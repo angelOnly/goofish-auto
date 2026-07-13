@@ -18,6 +18,7 @@ strip_html = pipeline.strip_html
 parse_goofish_result_record = pipeline.parse_goofish_result_record
 apply_market_signals = pipeline.apply_market_signals
 extract_baidu_delivery_from_html = pipeline.extract_baidu_delivery_from_html
+extract_member_download_context = pipeline.extract_member_download_context
 selection_db_path = pipeline.selection_db_path
 set_course_published = pipeline.set_course_published
 validate_member_cookie = pipeline.validate_member_cookie
@@ -62,6 +63,15 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(delivery["status"], "found")
         self.assertEqual(delivery["links"], ["https://pan.baidu.com/s/1Ab_cdE"])
         self.assertEqual(delivery["passwords"], ["exn7"])
+
+    def test_extracts_member_download_context(self):
+        context = extract_member_download_context(
+            '<script>var caozhuti={"ajaxurl":"https:\\/\\/theitzy.net\\/wp-admin\\/admin-ajax.php"}</script>'
+            '<a target="_blank" data-id="25611" class="go-down btn">立即下载</a>',
+            "https://theitzy.net/course/",
+        )
+        self.assertEqual(context["post_id"], "25611")
+        self.assertEqual(context["ajax_url"], "https://theitzy.net/wp-admin/admin-ajax.php")
 
     def test_run_is_review_first(self):
         task = {
@@ -116,6 +126,39 @@ class PipelineTests(unittest.TestCase):
             delivery_text = (item_dir / "delivery.md").read_text(encoding="utf-8")
             self.assertIn("https://pan.baidu.com/s/1Member", delivery_text)
             self.assertIn("m123", delivery_text)
+
+    def test_member_delivery_follows_ajax_go_redirect(self):
+        task = {
+            "name": "会员链接 AJAX 测试",
+            "source": "theitzy",
+            "keywords": ["AI"],
+            "rights_confirmed": True,
+            "authorized_assets": False,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+            },
+        }
+        item = {
+            "id": "theitzy:25611",
+            "source_id": 25611,
+            "title": "测试课程",
+            "page_url": "https://theitzy.net/course/",
+        }
+        page_html = (
+            '<script>var caozhuti={"ajaxurl":"https:\\/\\/theitzy.net\\/wp-admin\\/admin-ajax.php"}</script>'
+            '<a target="_blank" data-id="25611" class="go-down btn">立即下载</a>'
+            '<span class="pwd">文件密码：<span>qa8i</span></span>'
+        )
+        go_html = "<script>window.location='https://pan.baidu.com/s/1RealLink'</script>"
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
+            with patch.object(pipeline, "http_text", side_effect=[page_html, go_html]):
+                with patch.object(pipeline, "http_form_json", return_value={"status": "1", "msg": "https://theitzy.net/go?post_id=25611"}):
+                    delivery = pipeline.fetch_member_delivery(item, task, [])
+        self.assertEqual(delivery["status"], "found")
+        self.assertEqual(delivery["links"], ["https://pan.baidu.com/s/1RealLink"])
+        self.assertIn("qa8i", delivery["passwords"])
 
     def test_member_cookie_validation_blocks_invalid_login(self):
         task = {

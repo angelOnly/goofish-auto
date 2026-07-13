@@ -130,6 +130,30 @@ def http_json(url: str, *, timeout: int = 30) -> Any:
     return json.loads(http_text(url, timeout=timeout, headers={"Accept": "application/json"}))
 
 
+def http_form_json(
+    url: str,
+    data: Dict[str, Any],
+    *,
+    timeout: int = 30,
+    headers: Optional[Dict[str, str]] = None,
+) -> Any:
+    request_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    request_headers.update(headers or {})
+    request = Request(
+        url,
+        data=urlencode(data).encode("utf-8"),
+        headers=request_headers,
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", errors="replace"))
+
+
 def _wordpress_cookie_username(cookie: str) -> str:
     match = re.search(r"wordpress_logged_in_[^=]*=([^;]+)", cookie or "")
     if not match:
@@ -273,6 +297,52 @@ def extract_baidu_delivery_from_html(content_html: str, page_url: str = "") -> D
         "passwords": passwords,
         "source_url": page_url,
     }
+
+
+def _decode_js_url(value: str) -> str:
+    return html.unescape(value or "").replace("\\/", "/")
+
+
+def extract_member_download_context(content_html: str, page_url: str) -> Dict[str, str]:
+    post_id = ""
+    ajax_url = ""
+    post_match = re.search(
+        r'class=["\'][^"\']*\bgo-down\b[^"\']*["\'][^>]*\bdata-id=["\'](\d+)["\']',
+        content_html or "",
+        flags=re.I,
+    )
+    if not post_match:
+        post_match = re.search(
+            r'\bdata-id=["\'](\d+)["\'][^>]*class=["\'][^"\']*\bgo-down\b',
+            content_html or "",
+            flags=re.I,
+        )
+    if post_match:
+        post_id = post_match.group(1)
+
+    ajax_match = re.search(r'"ajaxurl"\s*:\s*"([^"]+)"', content_html or "", flags=re.I)
+    if ajax_match:
+        ajax_url = _decode_js_url(ajax_match.group(1))
+    if not ajax_url:
+        parsed = urlparse(page_url)
+        if parsed.scheme and parsed.netloc:
+            ajax_url = f"{parsed.scheme}://{parsed.netloc}/wp-admin/admin-ajax.php"
+    return {"post_id": post_id, "ajax_url": ajax_url}
+
+
+def _merge_delivery(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+    links: List[str] = []
+    passwords: List[str] = []
+    for source in (left, right):
+        for link in source.get("links", []) or []:
+            if link and link not in links:
+                links.append(link)
+        for password in source.get("passwords", []) or []:
+            if password and password not in passwords:
+                passwords.append(password)
+    status = "found" if links else str(right.get("status") or left.get("status") or "not_found")
+    merged = {**left, **right, "status": status, "links": links, "passwords": passwords}
+    return merged
 
 
 def normalise_title(value: str) -> str:
@@ -681,6 +751,40 @@ def fetch_member_delivery(
         )
         last_request[:] = [time.monotonic()]
         delivery = extract_baidu_delivery_from_html(content, page_url)
+        if not delivery.get("links"):
+            context = extract_member_download_context(content, page_url)
+            post_id = str(item.get("source_id") or "").strip() or context.get("post_id", "")
+            ajax_url = context.get("ajax_url", "")
+            if post_id and ajax_url:
+                ajax_payload = http_form_json(
+                    ajax_url,
+                    {"action": "user_down_ajax", "post_id": post_id},
+                    timeout=timeout,
+                    headers={
+                        "Cookie": cookie,
+                        "Referer": page_url,
+                    },
+                )
+                ajax_msg = str(ajax_payload.get("msg") or "")
+                ajax_delivery = extract_baidu_delivery_from_html(ajax_msg, page_url)
+                if not ajax_delivery.get("links") and ajax_payload.get("status") in {1, "1"} and ajax_msg:
+                    go_url = urljoin(page_url, _decode_js_url(ajax_msg))
+                    go_content = http_text(
+                        go_url,
+                        timeout=timeout,
+                        headers={
+                            "Accept": "text/html",
+                            "Cookie": cookie,
+                            "Referer": page_url,
+                        },
+                    )
+                    ajax_delivery = extract_baidu_delivery_from_html(go_content, go_url)
+                if ajax_delivery.get("links"):
+                    delivery = _merge_delivery(delivery, ajax_delivery)
+                elif ajax_payload.get("msg"):
+                    delivery["message"] = str(ajax_payload.get("msg"))
+            else:
+                delivery["message"] = "页面没有找到下载按钮 data-id 或 ajaxurl。"
         LOGGER.info(
             "member_delivery fetched course_id=%s status=%s links=%s",
             item.get("id"),
