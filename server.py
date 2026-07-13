@@ -70,13 +70,13 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
 
   <section class="grid">
     <div class="panel stack">
-      <h2>本地资源任务</h2>
+      <h2>本地资源整理</h2>
       <div class="row">
         <select id="localTask"></select>
         <label class="row"><input id="includeSeen" type="checkbox"> 包含已处理</label>
         <button id="runBtn">运行一次</button>
       </div>
-      <div class="help">这里跑的是本地资源整理流程。跑完后点“查看”，再点每条记录的“文案”，就能复制闲鱼文案和发货说明。</div>
+      <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI数字产品选品整理”任务；它会生成待审核文案和发货说明。下面的“闲鱼热点监控”才是远程闲鱼监控任务。</div>
       <div id="localStatus" class="status"></div>
       <div id="runs"></div>
     </div>
@@ -85,10 +85,10 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
       <h2>闲鱼热点监控</h2>
       <div class="row">
         <button id="loadGoofishBtn">测试连接/刷新任务</button>
-        <button class="secondary" id="previewBootstrapBtn">预览将同步的任务</button>
-        <button id="startBootstrapBtn">同步缺失任务并启动</button>
+        <button class="secondary" id="previewBootstrapBtn">预览本地配置</button>
+        <button id="startBootstrapBtn">创建缺失任务到闲鱼监控</button>
       </div>
-      <div class="help">当前配置只保留 2 个监控：1 个关键词低成本任务 + 1 个 AI 文本判断任务。配置已关闭图片分析（analyze_images=false），cron 为 `0 */12 * * *`，表示每 12 小时一次。“已启用”表示会按“下次运行”时间自动采集；如果出现同名重复，说明远程已经有多条旧任务，建议只保留一条。</div>
+      <div class="help">“预览本地配置”只查看将要提交的 2 个任务，不会创建。“创建缺失任务到闲鱼监控”会调用远程 API：远程没有同名任务就创建并启动，已有同名任务就跳过，不会更新或覆盖旧任务。当前配置已关闭图片分析（analyze_images=false），cron 为 `0 */12 * * *`，表示每 12 小时一次。</div>
       <div id="goofishStatus" class="status"></div>
       <div id="goofishTasks"></div>
     </div>
@@ -257,21 +257,21 @@ async function previewBootstrap(){
   try{
     const data = await api('/api/goofish/bootstrap/dry-run',{method:'POST'});
     const summary = summarizeBootstrapResult(data);
-    $('goofishTasks').innerHTML = '<h3>将同步的任务</h3><pre>'+esc(JSON.stringify(data,null,2))+'</pre>';
+    $('goofishTasks').innerHTML = '<h3>本地配置预览（不会创建）</h3><pre>'+esc(JSON.stringify(data,null,2))+'</pre>';
     setStatus('goofishStatus',`预览完成：配置里 ${summary.total} 个任务。这里只是预览，没有调用远程创建。`,'ok');
   }catch(e){ setStatus('goofishStatus', e.message, 'bad'); }
   finally{ btn.disabled = false; }
 }
 async function startBootstrap(){
-  if(!confirm('确认同步 goofish_tasks.json 里的 2 个热点监控任务？已存在同名任务会跳过，只创建缺失任务。')) return;
+  if(!confirm('确认把 goofish_tasks.json 里的 2 个任务创建到闲鱼监控？远程已有同名任务会跳过，只创建缺失任务。')) return;
   const btn = $('startBootstrapBtn');
   btn.disabled = true;
-  setStatus('goofishStatus','正在同步缺失任务并启动新任务。当前配置只看文本，不分析图片...');
+  setStatus('goofishStatus','正在创建远程缺失任务，并启动新创建的任务。当前配置只看文本，不分析图片...');
   try{
     const data = await api('/api/goofish/bootstrap/start',{method:'POST'});
     const summary = summarizeBootstrapResult(data);
     $('goofishTasks').innerHTML = '<h3>执行结果</h3><pre>'+esc(JSON.stringify(data,null,2))+'</pre>';
-    setStatus('goofishStatus',`同步完成：新建 ${summary.created} 个，跳过已存在 ${summary.skipped} 个。新任务已按文本分析、每 12 小时一次配置。`,'ok');
+    setStatus('goofishStatus',`创建完成：实际新建 ${summary.created} 个，已有同名跳过 ${summary.skipped} 个。新任务已按文本分析、每 12 小时一次配置。`,'ok');
     await loadGoofishTasks();
   }catch(e){ setStatus('goofishStatus', e.message, 'bad'); }
   finally{ btn.disabled = false; }

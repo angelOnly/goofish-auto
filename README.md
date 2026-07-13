@@ -11,7 +11,7 @@
 ```powershell
 cd E:\ai\skills\xinli\resource_pipeline
 python .\cli.py list
-python .\cli.py run --task "AI工具与智能体"
+python .\cli.py run --task "AI数字产品选品整理"
 python .\cli.py serve
 ```
 
