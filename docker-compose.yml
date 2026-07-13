@@ -4,11 +4,11 @@ services:
       context: .
     container_name: goofish-resource-pipeline
     restart: unless-stopped
-    command: ["python", "-m", "resource_pipeline.cli", "serve", "--host", "0.0.0.0", "--port", "8765"]
+    command: ["python", "cli.py", "serve", "--host", "0.0.0.0", "--port", "8765"]
     ports:
       - "8765:8765"
     volumes:
-      - ./output:/app/resource_pipeline/output
+      - ./:/app
     environment:
       PIPELINE_HOST: 0.0.0.0
       PIPELINE_PORT: "8765"
@@ -27,7 +27,7 @@ services:
     build:
       context: .
     profiles: ["bootstrap"]
-    command: ["python", "-m", "resource_pipeline.cli", "goofish-create", "--config", "/app/resource_pipeline/goofish_tasks.json", "--start"]
+    command: ["python", "cli.py", "goofish-create", "--config", "/app/goofish_tasks.json", "--start"]
     environment:
       GOOFISH_API_BASE_URL: ${GOOFISH_API_BASE_URL:-https://goofish.xiaolicloud.cn:18443}
       GOOFISH_API_TOKEN: ${GOOFISH_API_TOKEN:-}
