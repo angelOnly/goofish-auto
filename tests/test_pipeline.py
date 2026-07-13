@@ -129,6 +129,19 @@ class PipelineTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     validate_member_cookie(task)
 
+    def test_member_cookie_validation_reports_gateway_errors_clearly(self):
+        task = {
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+            },
+        }
+        error = pipeline.HTTPError("https://theitzy.net/user/?action=vip", 502, "Bad Gateway", {}, None)
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
+            with patch.object(pipeline, "http_text", side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, "站点网关/服务器临时异常"):
+                    validate_member_cookie(task)
+
     def test_only_published_selection_is_filtered_next_time(self):
         raw = [{
             "id": "theitzy:1",

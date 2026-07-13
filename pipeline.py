@@ -152,15 +152,26 @@ def validate_member_cookie(task: Dict[str, Any]) -> Optional[Dict[str, str]]:
     base_url = str(source_config.get("base_url") or "https://theitzy.net").rstrip("/")
     check_url = str(source_config.get("member_cookie_check_url") or f"{base_url}/user/?action=vip")
     timeout = int(source_config.get("member_timeout", 30))
-    content = http_text(
-        check_url,
-        timeout=timeout,
-        headers={
-            "Accept": "text/html",
-            "Cookie": cookie,
-            "Referer": base_url,
-        },
-    )
+    try:
+        content = http_text(
+            check_url,
+            timeout=timeout,
+            headers={
+                "Accept": "text/html",
+                "Cookie": cookie,
+                "Referer": base_url,
+            },
+        )
+    except HTTPError as exc:
+        if exc.code >= 500:
+            raise RuntimeError(
+                f"TheItzy 会员校验页返回 HTTP {exc.code}，这是站点网关/服务器临时异常，不是 Cookie 缺失；请稍后重试。"
+            ) from exc
+        if exc.code in {401, 403}:
+            raise RuntimeError(f"{cookie_env} 已失效或无权访问会员校验页；请重新从浏览器复制 Cookie。") from exc
+        raise RuntimeError(f"TheItzy 会员校验页返回 HTTP {exc.code}，无法继续本地资源整理。") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"无法访问 TheItzy 会员校验页：{exc}") from exc
     username = _wordpress_cookie_username(cookie)
     haystack = f"{content}\n{strip_html(content, 20000)}".lower()
     configured_markers = [str(value).strip() for value in source_config.get("member_cookie_valid_markers", []) if str(value).strip()]

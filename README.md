@@ -57,6 +57,8 @@ python .\cli.py goofish-create --task "近15天AI虚拟课程核心热点" --sta
 
 浏览器已经登录并不等于本地 Python 进程能直接复用登录态。要让定时任务请求 TheItzy 会员页，需要在本机 `.env` 填写 `THEITZY_COOKIE`，并把 `tasks.json` 里的 `source_config.fetch_member_delivery` 改成 `true`。启用后，本地资源整理会先请求会员校验页；Cookie 有效才继续跑任务，失效会直接中断。不要把 Cookie 发到聊天或提交到 Git；Cookie 过期后需要重新更新。程序只解析页面里可见的 `pan.baidu.com` 链接和提取码/文件密码，不下载课程文件。
 
+如果通过 Docker 运行，`docker-compose.yml` 会从执行 `docker compose` 的目录读取宿主机 `.env` 并注入 `THEITZY_COOKIE`；改完 `.env` 后需要重新 `docker compose up -d --build` 或重建/重启容器。Cookie 里常有 `$visitNum` 这类字段，Docker Compose 可能当作变量插值，建议写成单引号包裹的一整行：`THEITZY_COOKIE='PHPSESSID=...; wordpress_logged_in_...=...; conv_person={"$visitNum":3,...}'`。
+
 若还要在本地保存已获授权的封面，把任务的 `authorized_assets` 改为 `true`。程序只会下载与来源同域的图片，最多 8 MB，不下载视频、课程、压缩包或登录后内容。
 
 ## 输出结构

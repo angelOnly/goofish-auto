@@ -39,6 +39,7 @@ services:
       GOOFISH_API_TIMEOUT: ${GOOFISH_API_TIMEOUT:-30}
       GOOFISH_POLL_SECONDS: ${GOOFISH_POLL_SECONDS:-2}
       GOOFISH_MAX_WAIT_SECONDS: ${GOOFISH_MAX_WAIT_SECONDS:-1800}
+      THEITZY_COOKIE: ${THEITZY_COOKIE:-}
 
   # One-shot task bootstrap. It is behind a profile so a normal `up -d`
   # does not unexpectedly call the remote task API.
