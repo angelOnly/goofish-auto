@@ -222,6 +222,38 @@ function publishCellHtml(item){
   const time = status.published_at ? `<small>${esc(status.published_at)}</small>` : '';
   return `<div class="publish-cell">${label}${time}<br><button class="secondary mini js-toggle-published" data-course-id="${esc(item.id)}" data-published="${publishedValue}">${action}</button></div>`;
 }
+function hasPrice(value){
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+}
+function money(value){
+  const number = Number(value);
+  if(!Number.isFinite(number)) return '';
+  return (Math.round(number * 100) / 100).toFixed(2).replace(/[.]?0+$/,'');
+}
+function marketPriceText(item, fallback='暂无价格样本'){
+  const median = item?.market_median_price;
+  if(!hasPrice(median)) return fallback;
+  const min = item?.market_price_min;
+  const max = item?.market_price_max;
+  const pieces = [`中位价 ¥${money(median)}`];
+  if(hasPrice(min) && hasPrice(max) && Number(min) !== Number(max)){
+    pieces.push(`区间 ¥${money(min)}-${money(max)}`);
+  }
+  if(item?.market_reference_count){
+    pieces.push(`样本 ${item.market_reference_count} 条`);
+  }
+  return pieces.join('；');
+}
+function marketPriceCell(item){
+  if(!hasPrice(item?.market_median_price)){
+    return '<span class="muted">无价格</span>';
+  }
+  const range = hasPrice(item.market_price_min) && hasPrice(item.market_price_max) && Number(item.market_price_min) !== Number(item.market_price_max)
+    ? `<br><small>¥${esc(money(item.market_price_min))}-${esc(money(item.market_price_max))}</small>`
+    : '';
+  const count = item.market_reference_count ? `<br><small>${esc(item.market_reference_count)} 条样本</small>` : '';
+  return `<strong>¥${esc(money(item.market_median_price))}</strong>${range}${count}`;
+}
 
 async function loadConfig(){
   const cfg = await api('/api/goofish/config');
@@ -267,11 +299,11 @@ async function showRun(runId){
     const marketCell = item.market_match_score
       ? `<span class="pill ok">+${esc(item.market_match_score)}</span><br><small>${esc(marketTerms)}</small>`
       : '<span class="muted">无</span>';
-    return `<tr class="result-row" data-folder="${folder}" data-course-id="${esc(item.id)}"><td>${esc(item.title)}</td><td>${esc(item.hotness_score)}<br><small>本地 ${esc(item.base_hotness_score ?? item.hotness_score)}</small></td><td>${marketCell}</td><td>${publishCellHtml(item)}</td><td><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">来源</a></td><td><button class="secondary mini js-show-item" data-folder="${folder}">文案</button></td></tr><tr class="inline-detail-row" data-detail-for="${folder}" style="display:none"><td colspan="6"></td></tr>`;
+    return `<tr class="result-row" data-folder="${folder}" data-course-id="${esc(item.id)}"><td>${esc(item.title)}</td><td>${esc(item.hotness_score)}<br><small>本地 ${esc(item.base_hotness_score ?? item.hotness_score)}</small></td><td>${marketCell}</td><td>${marketPriceCell(item)}</td><td>${publishCellHtml(item)}</td><td><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">来源</a></td><td><button class="secondary mini js-show-item" data-folder="${folder}">文案</button></td></tr><tr class="inline-detail-row" data-detail-for="${folder}" style="display:none"><td colspan="7"></td></tr>`;
   }).join('');
   $('runDetail').innerHTML = `<p><span class="pill">${esc(data.task_name)}</span> ${esc(data.count)} 条</p>` +
     renderDiagnostics(data) +
-    `<table><thead><tr><th>标题</th><th>热度</th><th>市场匹配</th><th>发布状态</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    `<table><thead><tr><th>标题</th><th>热度</th><th>市场匹配</th><th>同行价</th><th>发布状态</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   $('itemDetail').innerHTML = '';
 }
 async function showItem(folder){
@@ -305,9 +337,10 @@ async function showItem(folder){
       : `<p class="tiny">这个条目没有公开图片。</p>`;
     const marketTerms = (data.item?.market_matched_terms || []).slice(0, 8).join(', ');
     const marketRefs = (data.item?.market_reference_titles || []).slice(0, 3).map(ref => `<li>${esc(ref.title)}${ref.price ? ` <small>¥${esc(ref.price)}</small>` : ''}</li>`).join('');
+    const priceText = marketPriceText(data.item);
     const marketHtml = marketTerms
-      ? `<p class="tiny">闲鱼匹配：${esc(marketTerms)}${data.item?.market_median_price ? `；中位价约 ¥${esc(data.item.market_median_price)}` : ''}</p>${marketRefs ? `<ul class="tiny">${marketRefs}</ul>` : ''}`
-      : '<p class="tiny">暂无闲鱼市场匹配。</p>';
+      ? `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">闲鱼匹配：${esc(marketTerms)}</p>${marketRefs ? `<ul class="tiny">${marketRefs}</ul>` : ''}`
+      : `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">暂无闲鱼市场匹配。</p>`;
     const sourceHtml = data.page_url
       ? `<p class="tiny">来源核验：<a href="${esc(data.page_url)}" target="_blank" rel="noreferrer">课程页</a></p>`
       : '<p class="tiny">这个条目没有公开课程页地址。</p>';

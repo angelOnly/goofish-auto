@@ -164,6 +164,8 @@ class PipelineTests(unittest.TestCase):
         self.assertGreater(boosted["hotness_score"], course["hotness_score"])
         self.assertIn("vercel ai", boosted["market_matched_terms"])
         self.assertEqual(boosted["market_median_price"], 9.9)
+        self.assertEqual(boosted["market_price_min"], 9.9)
+        self.assertEqual(boosted["market_price_max"], 9.9)
 
 
 if __name__ == "__main__":

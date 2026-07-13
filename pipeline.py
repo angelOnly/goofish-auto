@@ -1009,6 +1009,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
                 "market_reference_titles": item.get("market_reference_titles", []),
                 "market_avg_price": item.get("market_avg_price"),
                 "market_median_price": item.get("market_median_price"),
+                "market_price_min": item.get("market_price_min"),
+                "market_price_max": item.get("market_price_max"),
                 "selection_status": item.get("selection_status", {"published": False}),
                 "matched_keywords": item.get("matched_keywords", []),
                 "page_url": item["page_url"],
