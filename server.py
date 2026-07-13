@@ -411,28 +411,67 @@ function renderPublishedItems(items, query=''){
       <td>
         <button class="secondary mini js-copy-published" data-index="${index}" data-field="copy_display">复制文案</button>
         <button class="secondary mini js-copy-published" data-index="${index}" data-field="delivery_payload">复制发货</button>
+        <button class="secondary mini js-edit-delivery" data-index="${index}">${item.delivery_payload ? '编辑发货' : '添加发货'}</button>
         <button class="secondary mini js-preview-published" data-index="${index}">看内容</button>
       </td>
     </tr>`;
   }).join('');
   $('publishedResults').innerHTML = `<table><thead><tr><th>标题</th><th>发货状态</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
-function previewPublishedItem(index){
+function manualDeliveryEditorHtml(item){
+  return `<h3>手动补充发货</h3>
+    <div class="help">把百度网盘链接和提取码粘到这里保存。保存后“复制发货”会优先复制这里的内容。</div>
+    <textarea id="manualDeliveryText" rows="7" style="width:100%;min-height:140px;border:1px solid #cbd5e1;border-radius:8px;padding:10px;font:inherit">${esc(item.delivery_payload || '')}</textarea>
+    <div class="copy-actions">
+      <button class="secondary mini js-save-manual-delivery" data-course-id="${esc(item.id || '')}">保存发货链接</button>
+    </div>`;
+}
+function previewPublishedItem(index, editDelivery=false){
   const item = publishedItems[Number(index)];
   if(!item) return;
   currentItem = item;
   const deliveryHtml = item.delivery_payload
-    ? `<h3>发货内容</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery_payload">复制发货</button></div><pre>${esc(item.delivery_payload)}</pre>`
+    ? `<h3>发货内容</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery_payload">复制发货</button><button class="secondary mini js-show-manual-editor">编辑发货</button></div><pre>${esc(item.delivery_payload)}</pre>`
     : `<h3>发货内容</h3><p class="warn">${esc(item.delivery_status_text || '未获取百度网盘链接')}</p>`;
+  const editorHtml = editDelivery || !item.delivery_payload ? manualDeliveryEditorHtml(item) : '';
   const sourceHtml = item.page_url
     ? `<h3>来源核验</h3><p><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">${esc(item.page_url)}</a></p>`
     : '';
   $('itemDetail').innerHTML =
     `<h3>已发布商品</h3><p><strong>${esc(item.title)}</strong><br><small>${esc(item.published_at || '')}</small></p>` +
     deliveryHtml +
+    editorHtml +
     `<h3>完整闲鱼文案 ${copySourceLabel(item.copy_source)}</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_display">复制文案</button></div><pre>${esc(item.copy_display || '')}</pre>` +
     sourceHtml;
   $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
+}
+async function saveManualDelivery(courseId, button=null){
+  const textarea = $('manualDeliveryText');
+  const payload = textarea?.value?.trim() || '';
+  if(!payload){
+    setStatus('publishedStatus','发货内容为空，先粘贴百度网盘链接和提取码。','warn');
+    return;
+  }
+  const originalText = button?.textContent;
+  if(button){ button.disabled = true; button.textContent = '保存中'; }
+  try{
+    const data = await api('/api/local/published/delivery',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({course_id:courseId, delivery_payload:payload})
+    });
+    const index = publishedItems.findIndex(item => item.id === data.id);
+    if(index >= 0) publishedItems[index] = data;
+    currentItem = data;
+    renderPublishedItems(publishedItems, $('publishedQuery').value.trim());
+    setStatus('publishedStatus','发货链接已保存，后续可直接复制发货。','ok');
+    const nextIndex = Math.max(0, publishedItems.findIndex(item => item.id === data.id));
+    previewPublishedItem(nextIndex, false);
+  }catch(e){
+    setStatus('publishedStatus', e.message, 'bad');
+  }finally{
+    if(button){ button.disabled = false; button.textContent = originalText; }
+  }
 }
 async function showItem(folder){
   const detailRow = detailRowFor(folder);
@@ -645,7 +684,13 @@ document.addEventListener('click', (event) => {
     const item = publishedItems[Number(target.dataset.index)];
     copyText(item?.[target.dataset.field], target.textContent.trim(), target);
   }
+  else if(target.classList.contains('js-edit-delivery')) previewPublishedItem(target.dataset.index, true);
   else if(target.classList.contains('js-preview-published')) previewPublishedItem(target.dataset.index);
+  else if(target.classList.contains('js-show-manual-editor')){
+    const index = publishedItems.findIndex(item => item.id === currentItem?.id);
+    if(index >= 0) previewPublishedItem(index, true);
+  }
+  else if(target.classList.contains('js-save-manual-delivery')) saveManualDelivery(target.dataset.courseId, target);
   else if(target.classList.contains('js-show-full')) showFullItem(target.dataset.folder);
   else if(target.classList.contains('js-toggle-published')) togglePublished(target.dataset.courseId, target.dataset.published === 'true');
   else if(target.classList.contains('js-start-remote')) startRemoteTask(target.dataset.taskId);
@@ -765,6 +810,9 @@ def _safe_output_path(relative_path: str) -> Path:
 
 
 def _delivery_payload(item: dict[str, object]) -> tuple[str, str]:
+    manual_payload = str(item.get("manual_delivery_payload") or "").strip()
+    if manual_payload:
+        return manual_payload, "可复制发货（手动补充）"
     member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else {}
     rights_confirmed = item.get("rights_review") == "confirmed"
     links = [str(value) for value in member_delivery.get("links", []) if str(value).strip()]
@@ -864,6 +912,60 @@ def _list_published_items(query: str = "", limit: int = 80) -> dict[str, object]
         ).fetchall()
     items = [_published_item_payload(row) for row in rows]
     return {"items": items, "count": len(items), "query": query, "limit": limit}
+
+
+def _save_manual_delivery(course_id: str, delivery_payload: str) -> dict[str, object]:
+    course_id = (course_id or "").strip()
+    delivery_payload = (delivery_payload or "").strip()
+    if not course_id:
+        raise ValueError("缺少 course_id")
+    if not delivery_payload:
+        raise ValueError("发货内容不能为空")
+    if len(delivery_payload) > 10000:
+        raise ValueError("发货内容过长，请控制在 10000 字以内")
+
+    db_path = selection_db_path(OUTPUT_DIR)
+    if not db_path.exists():
+        raise ValueError("本地发布数据库不存在，请先运行一次本地资源整理")
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        with conn:
+            row = conn.execute(
+                """
+                SELECT course_id, title, source, page_url, published_at, last_selected_at,
+                       selection_count, raw_json
+                FROM course_selections
+                WHERE course_id = ? AND published = 1
+                """,
+                (course_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("没有找到这条已发布内容")
+            raw_json = str(row["raw_json"] or "")
+            try:
+                item = json.loads(raw_json) if raw_json else {}
+            except json.JSONDecodeError:
+                item = {}
+            if not isinstance(item, dict):
+                item = {}
+            item.setdefault("id", course_id)
+            item.setdefault("title", str(row["title"] or course_id))
+            item.setdefault("source", str(row["source"] or ""))
+            item.setdefault("page_url", str(row["page_url"] or ""))
+            item["manual_delivery_payload"] = delivery_payload
+            item["manual_delivery_updated_at"] = now
+            conn.execute(
+                "UPDATE course_selections SET raw_json = ?, updated_at = ? WHERE course_id = ?",
+                (json.dumps(item, ensure_ascii=False), now, course_id),
+            )
+    payload = _published_item_payload(row)
+    payload["item"]["manual_delivery_payload"] = delivery_payload
+    payload["item"]["manual_delivery_updated_at"] = now
+    payload["delivery_payload"] = delivery_payload
+    payload["delivery_status_text"] = "可复制发货（手动补充）"
+    return payload
 
 
 def _read_output_item(folder: str) -> dict[str, object]:
@@ -1032,6 +1134,12 @@ class Handler(BaseHTTPRequestHandler):
                     course_id,
                     bool(body.get("published", False)),
                     selection_db_path(OUTPUT_DIR),
+                )
+                self._send(200, result)
+            elif path == "/api/local/published/delivery":
+                result = _save_manual_delivery(
+                    str(body.get("course_id") or ""),
+                    str(body.get("delivery_payload") or ""),
                 )
                 self._send(200, result)
             else:

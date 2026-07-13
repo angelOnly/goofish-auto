@@ -115,6 +115,86 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(payload, "百度网盘链接：https://pan.baidu.com/s/1abc\n提取码/文件密码：exn7")
         self.assertIn("已获取", status)
 
+    def test_delivery_payload_prefers_manual_payload(self):
+        payload, status = _delivery_payload(
+            {
+                "rights_review": "confirmed",
+                "manual_delivery_payload": "百度网盘链接：https://pan.baidu.com/s/manual\n提取码：m123",
+                "member_delivery": {
+                    "links": ["https://pan.baidu.com/s/auto"],
+                    "passwords": ["auto"],
+                },
+            }
+        )
+        self.assertIn("/manual", payload)
+        self.assertIn("手动补充", status)
+
+    def test_save_manual_delivery_updates_published_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            db_path = output_dir / "selection.sqlite3"
+            conn = sqlite3.connect(db_path)
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE course_selections (
+                            course_id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            source TEXT,
+                            page_url TEXT,
+                            first_selected_at TEXT NOT NULL,
+                            last_selected_at TEXT NOT NULL,
+                            last_run_id TEXT,
+                            last_task_name TEXT,
+                            selection_count INTEGER NOT NULL DEFAULT 0,
+                            published INTEGER NOT NULL DEFAULT 0,
+                            published_at TEXT,
+                            updated_at TEXT NOT NULL,
+                            last_hotness_score REAL,
+                            last_market_match_score REAL,
+                            raw_json TEXT
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO course_selections (
+                            course_id, title, source, page_url, first_selected_at, last_selected_at,
+                            selection_count, published, published_at, updated_at, raw_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "theitzy:manual",
+                            "手动发货课程",
+                            "theitzy",
+                            "https://theitzy.net/manual/",
+                            "2026-07-14T00:00:00+08:00",
+                            "2026-07-14T00:00:00+08:00",
+                            1,
+                            1,
+                            "2026-07-14T00:10:00+08:00",
+                            "2026-07-14T00:10:00+08:00",
+                            json.dumps(
+                                {
+                                    "id": "theitzy:manual",
+                                    "title": "手动发货课程",
+                                    "rights_review": "confirmed",
+                                    "copy": "文案",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
+            finally:
+                conn.close()
+            manual = "百度网盘链接：https://pan.baidu.com/s/manual\n提取码：m123"
+            with patch.object(server, "OUTPUT_DIR", output_dir):
+                saved = server._save_manual_delivery("theitzy:manual", manual)
+                listed = server._list_published_items("手动")
+            self.assertEqual(saved["delivery_payload"], manual)
+            self.assertEqual(listed["items"][0]["delivery_payload"], manual)
+
     def test_delivery_payload_empty_when_rights_unconfirmed(self):
         payload, status = _delivery_payload(
             {
