@@ -24,7 +24,7 @@ services:
   pipeline:
     image: goofish-auto:local
     build: *app-build
-    container_name: goofish-resource-pipeline
+    container_name: goofish-auto
     restart: unless-stopped
     command: ["python", "cli.py", "serve", "--host", "0.0.0.0", "--port", "8765"]
     ports:
