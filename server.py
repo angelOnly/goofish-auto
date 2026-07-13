@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -127,6 +129,18 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     </div>
   </section>
 
+  <section class="panel stack">
+    <h2>已发布内容查询</h2>
+    <div class="row">
+      <input id="publishedQuery" type="search" placeholder="搜标题、课程地址或ID" style="min-width:280px">
+      <button id="searchPublishedBtn">查询已发布</button>
+      <button class="secondary" id="clearPublishedBtn">清空搜索</button>
+    </div>
+    <div class="help">这里直接查询本地 SQLite 里标记为“已发布”的商品，不依赖最近一次运行结果。用于后续买家发货时快速复制闲鱼文案或百度网盘发货信息。</div>
+    <div id="publishedStatus" class="status"></div>
+    <div id="publishedResults" class="muted">点击“查询已发布”查看已发布商品。</div>
+  </section>
+
   <section class="panel">
     <h2>结果详情</h2>
     <div id="runDetail" class="muted">点击最近运行里的“查看”查看生成条目。</div>
@@ -138,6 +152,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
 const $ = (id) => document.getElementById(id);
 let goofishUrls = {tasks_url:'https://goofish.xiaolicloud.cn:18443/tasks?create=1', results_url:'https://goofish.xiaolicloud.cn:18443/results'};
 let currentItem = null;
+let publishedItems = [];
 let expandedFolder = null;
 
 function esc(value){
@@ -716,6 +731,77 @@ def _delivery_payload(item: dict[str, object]) -> tuple[str, str]:
     return "", "未获取：没有百度网盘链接数据"
 
 
+def _published_item_payload(row: sqlite3.Row) -> dict[str, object]:
+    raw_json = str(row["raw_json"] or "")
+    try:
+        item = json.loads(raw_json) if raw_json else {}
+    except json.JSONDecodeError:
+        item = {}
+    if not isinstance(item, dict):
+        item = {}
+
+    course_id = str(row["course_id"] or item.get("id") or "")
+    item.setdefault("id", course_id)
+    item.setdefault("title", str(row["title"] or course_id))
+    item.setdefault("source", str(row["source"] or ""))
+    item.setdefault("page_url", str(row["page_url"] or ""))
+    item.setdefault("rights_review", item.get("rights_review") or "required")
+    item["selection_status"] = {
+        "published": True,
+        "published_at": row["published_at"],
+        "selection_count": int(row["selection_count"] or 0),
+        "last_selected_at": row["last_selected_at"],
+    }
+    rights_confirmed = item.get("rights_review") == "confirmed"
+    copy_suggested = template_copy(item, {"rights_confirmed": rights_confirmed}) if item else ""
+    copy_display = str(item.get("copy") or copy_suggested or "")
+    delivery_payload, delivery_status_text = _delivery_payload(item)
+    return {
+        "id": course_id,
+        "title": item.get("title", ""),
+        "source": item.get("source", ""),
+        "page_url": item.get("page_url", ""),
+        "published_at": row["published_at"],
+        "last_selected_at": row["last_selected_at"],
+        "selection_count": int(row["selection_count"] or 0),
+        "copy_display": copy_display,
+        "copy_source": item.get("copy_source", "template"),
+        "delivery_payload": delivery_payload,
+        "delivery_status_text": delivery_status_text,
+        "cover_url": item.get("cover_url", ""),
+        "item": item,
+    }
+
+
+def _list_published_items(query: str = "", limit: int = 80) -> dict[str, object]:
+    db_path = selection_db_path(OUTPUT_DIR)
+    limit = max(1, min(int(limit or 80), 200))
+    if not db_path.exists():
+        return {"items": [], "count": 0, "query": query, "limit": limit}
+    where = "published = 1"
+    params: list[object] = []
+    query = (query or "").strip()
+    if query:
+        where += " AND (title LIKE ? OR page_url LIKE ? OR course_id LIKE ?)"
+        like = f"%{query}%"
+        params.extend([like, like, like])
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT course_id, title, source, page_url, published_at, last_selected_at,
+                   selection_count, raw_json
+            FROM course_selections
+            WHERE {where}
+            ORDER BY COALESCE(published_at, updated_at, last_selected_at) DESC
+            LIMIT ?
+            """,
+            [*params, limit],
+        ).fetchall()
+    items = [_published_item_payload(row) for row in rows]
+    return {"items": items, "count": len(items), "query": query, "limit": limit}
+
+
 def _read_output_item(folder: str) -> dict[str, object]:
     item_dir = _safe_output_path(folder)
     if not item_dir.is_dir():
@@ -812,6 +898,15 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/local/item":
                 folder = parse_qs(parsed.query).get("folder", [""])[0]
                 self._send(200, _read_output_item(folder))
+            elif path == "/api/local/published":
+                query = parse_qs(parsed.query)
+                q = (query.get("q") or [""])[0]
+                limit_text = (query.get("limit") or ["80"])[0]
+                try:
+                    limit = int(limit_text)
+                except ValueError:
+                    limit = 80
+                self._send(200, _list_published_items(q, limit))
             elif path == "/api/local/run-status":
                 query = parse_qs(parsed.query)
                 job_id = (query.get("job_id") or query.get("id") or [""])[0]
