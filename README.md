@@ -17,6 +17,8 @@ python .\cli.py serve
 
 然后打开 `http://127.0.0.1:8765/`。TheItzy 的 robots.txt 声明了 10 秒 crawl-delay，所以默认每次请求间隔 10 秒；不要通过并发、代理轮换或改 User-Agent 绕过限制。
 
+本地整理任务会在页面“运行诊断”里显示抓取数、已处理跳过数、关键词命中数和最终输出数；容器日志也会打印每页抓取、筛选和完成状态。若输出为 0，优先看诊断里的 `zero_reason`，常见原因是本次抓到的文章都已经处理过，此时可以勾选“包含已处理”复查。
+
 ## 自动创建闲鱼热点监控任务
 
 `goofish_tasks.json` 是批量任务配置，现在只保留 2 个低成本监控任务：1 个关键词快速筛选任务 + 1 个 AI 文本判断任务。两者都关闭图片分析（`analyze_images=false`），默认每 12 小时执行一次（`0 */12 * * *`）。同步器会先调用 `GET /api/tasks` 按任务名去重；AI 任务再调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
@@ -99,5 +101,11 @@ docker compose --profile bootstrap run --rm goofish-bootstrap
 docker compose logs -f pipeline
 docker compose down
 ```
+
+日志里重点看这些字段：
+
+- `fetch_theitzy response page=... count=...`：TheItzy 每页实际返回多少条。
+- `selection_done`：抓取数、跳过数、候选数、关键词命中数、最终输出数。
+- `zero_reason`：输出 0 条时的直接原因。
 
 `goofish-bootstrap` 默认会创建不存在的任务并启动新任务；重复执行会按任务名跳过已有任务。若只想查看提交内容，可在宿主机执行 `python .\cli.py goofish-create --dry-run`，避免误调用远端 API。远端已经存在的旧重复任务不会被自动删除或停止，需要在 Web 控制台或闲鱼监控后台里手动处理。

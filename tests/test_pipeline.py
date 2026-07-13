@@ -43,6 +43,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(item["matched_keywords"], ["python", "agent"])
         self.assertGreater(item["hotness_score"], 30)
 
+    def test_score_matches_summary_text(self):
+        item = score_item({"title": "项目资料", "categories": [], "summary": "包含 Cursor 和 MCP 工作流", "published_at": "2026-07-13T00:00:00+00:00", "cover_url": ""}, ["Cursor", "MCP"])
+        self.assertEqual(item["matched_keywords"], ["cursor", "mcp"])
+
     def test_run_is_review_first(self):
         task = {
             "name": "测试",
@@ -61,6 +65,26 @@ class PipelineTests(unittest.TestCase):
             item_dir = next(Path(tmp).glob("*/01-*"))
             self.assertIn("禁止发布", (item_dir / "copy.md").read_text(encoding="utf-8"))
             self.assertEqual(json.loads((item_dir / "item.json").read_text(encoding="utf-8"))["rights_review"], "required")
+
+    def test_seen_state_is_scoped_by_task_name(self):
+        raw = [{
+            "id": "theitzy:1",
+            "title": "AI 课程",
+            "page_url": "https://theitzy.net/a/",
+            "published_at": "2026-07-13T00:00:00+00:00",
+            "categories": ["AI"],
+            "summary": "摘要",
+            "cover_url": "",
+        }]
+        task_a = {"name": "任务A", "source": "theitzy", "keywords": ["AI"], "source_config": {"base_url": "https://theitzy.net"}}
+        task_b = {"name": "任务B", "source": "theitzy", "keywords": ["AI"], "source_config": {"base_url": "https://theitzy.net"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pipeline, "fetch_source", return_value=raw):
+                self.assertEqual(run_task(task_a, output_dir=Path(tmp))["count"], 1)
+                self.assertEqual(run_task(task_b, output_dir=Path(tmp))["count"], 1)
+                skipped = run_task(task_b, output_dir=Path(tmp))
+            self.assertEqual(skipped["count"], 0)
+            self.assertEqual(skipped["diagnostics"]["skipped_seen_count"], 1)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
 import math
 import os
 import re
@@ -29,6 +30,7 @@ OUTPUT_DIR = ROOT / "output"
 TASKS_FILE = ROOT / "tasks.json"
 ENV_FILE = ROOT / ".env"
 USER_AGENT = "XinliResourcePipeline/0.1 (local review; respects robots.txt)"
+LOGGER = logging.getLogger("goofish_auto.pipeline")
 
 
 class TextExtractor(HTMLParser):
@@ -157,6 +159,14 @@ def fetch_theitzy(task: Dict[str, Any]) -> List[Dict[str, Any]]:
     max_pages = max(1, min(int(source.get("max_pages", 1)), 10))
     interval = float(source.get("request_interval_seconds", 10))
     last_request: List[float] = []
+    LOGGER.info(
+        "fetch_theitzy start task=%s base_url=%s per_page=%s max_pages=%s interval=%s",
+        task.get("name"),
+        base_url,
+        per_page,
+        max_pages,
+        interval,
+    )
 
     def get_json(url: str) -> Any:
         sleep_between_requests(last_request, interval)
@@ -176,18 +186,23 @@ def fetch_theitzy(task: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "_fields": "id,date,link,title,content,excerpt,jetpack_featured_media_url,categories,tags",
             }
         )
+        url = f"{base_url}/wp-json/wp/v2/posts?{query}"
+        LOGGER.info("fetch_theitzy request page=%s url=%s", page, url)
         try:
-            data = get_json(f"{base_url}/wp-json/wp/v2/posts?{query}")
+            data = get_json(url)
         except HTTPError as exc:
             if exc.code == 400 and page > 1:
+                LOGGER.info("fetch_theitzy stop page=%s reason=http_400_no_more_pages", page)
                 break
             raise RuntimeError(f"TheItzy API 请求失败: HTTP {exc.code}") from exc
         except (URLError, TimeoutError, ValueError) as exc:
             raise RuntimeError(f"TheItzy API 请求失败: {exc}") from exc
         if not isinstance(data, list):
             raise RuntimeError("TheItzy API 返回格式不是列表")
+        LOGGER.info("fetch_theitzy response page=%s count=%s", page, len(data))
         raw_posts.extend(data)
         if len(data) < per_page:
+            LOGGER.info("fetch_theitzy stop page=%s reason=last_page count=%s", page, len(data))
             break
 
     # The site has more than 100 categories, so resolving only the first page
@@ -201,10 +216,14 @@ def fetch_theitzy(task: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"{base_url}/wp-json/wp/v2/categories?include={include}&per_page=100&_fields=id,name"
             )
             category_map.update({int(item["id"]): str(item["name"]) for item in categories})
+            LOGGER.info("fetch_theitzy categories resolved=%s requested=%s", len(category_map), len(category_ids))
         except (HTTPError, URLError, TimeoutError, ValueError, KeyError):
             # Category names are helpful but not required for metadata monitoring.
+            LOGGER.exception("fetch_theitzy categories failed requested=%s", len(category_ids))
             pass
-    return [parse_wp_post(item, category_map) for item in raw_posts]
+    parsed = [parse_wp_post(item, category_map) for item in raw_posts]
+    LOGGER.info("fetch_theitzy done raw_posts=%s parsed=%s", len(raw_posts), len(parsed))
+    return parsed
 
 
 def fetch_source(task: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -220,9 +239,18 @@ def fetch_source(task: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def score_item(item: Dict[str, Any], keywords: Iterable[str]) -> Dict[str, Any]:
-    title = f"{item.get('title', '')} {' '.join(item.get('categories', []))}".lower()
+    text = " ".join(
+        [
+            str(item.get("title", "")),
+            " ".join(str(value) for value in item.get("categories", [])),
+            str(item.get("summary", "")),
+        ]
+    ).lower()
     terms = [str(value).strip().lower() for value in keywords if str(value).strip()]
-    matched = [term for term in terms if term in title]
+    matched: List[str] = []
+    for term in terms:
+        if term in text and term not in matched:
+            matched.append(term)
     now = datetime.now(timezone.utc)
     published_at = str(item.get("published_at") or "")
     age_days = 365.0
@@ -407,68 +435,159 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / "state.json"
     state = load_state(state_path)
-    seen = state.setdefault("seen", {})
+    task_name = str(task.get("name") or "未命名任务")
+    task_seen = state.setdefault("seen_by_task", {}).setdefault(task_name, {})
+    legacy_seen = state.setdefault("seen", {})
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     asset_dir = run_dir / "assets"
     asset_dir.mkdir(exist_ok=True)
+    keywords = [str(value) for value in task.get("keywords", []) if str(value).strip()]
+    output_limit = max(1, min(int(task.get("output_limit", 20)), 100))
+    run_log: List[Dict[str, Any]] = []
 
+    def note(message: str, **fields: Any) -> None:
+        event = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "message": message,
+            **fields,
+        }
+        run_log.append(event)
+        LOGGER.info("run_id=%s task=%s %s %s", run_id, task_name, message, fields)
+
+    note(
+        "run_start",
+        source=task.get("source"),
+        include_seen=include_seen,
+        keyword_count=len(keywords),
+        output_limit=output_limit,
+    )
     raw_items = fetch_source(task)
-    items: List[Dict[str, Any]] = []
-    for raw in raw_items:
-        if not include_seen and raw["id"] in seen:
-            continue
-        scored = score_item(raw, task.get("keywords", []))
-        scored["cover_local_path"] = download_authorized_cover(scored, task, asset_dir)
-        scored["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
-        ai_copy = maybe_ai_copy(scored, task)
-        scored["copy"] = ai_copy or template_copy(scored, task)
-        scored["copy_source"] = "ai" if ai_copy else "template"
-        scored["delivery_links"] = list(task.get("owned_delivery_links", []))
-        items.append(scored)
-        seen[raw["id"]] = {"run_id": run_id, "title": raw.get("title")}
+    note("source_fetched", fetched_count=len(raw_items))
 
-    items.sort(key=lambda item: item.get("hotness_score", 0), reverse=True)
+    skipped_seen = 0
+    candidates: List[Dict[str, Any]] = []
+    for raw in raw_items:
+        item_id = str(raw.get("id") or "")
+        if not include_seen and item_id in task_seen:
+            skipped_seen += 1
+            continue
+        scored = score_item(raw, keywords)
+        candidates.append(scored)
+
+    matched_candidates = [item for item in candidates if item.get("matched_keywords")]
+    pool = matched_candidates if matched_candidates else candidates
+    fallback_used = bool(candidates and not matched_candidates)
+    pool.sort(key=lambda item: item.get("hotness_score", 0), reverse=True)
+    items = pool[:output_limit]
+
+    zero_reason = ""
+    if not raw_items:
+        zero_reason = "数据源没有返回文章，请检查 TheItzy API、网络或站点状态。"
+    elif skipped_seen == len(raw_items) and not include_seen:
+        zero_reason = "本次抓到的文章都已经在这个任务里处理过；如需复查旧数据，请勾选“包含已处理”。"
+    elif not candidates:
+        zero_reason = "抓到了文章，但没有可参与评分的候选项。"
+    elif not items:
+        zero_reason = "候选项为空，未生成输出。"
+
+    diagnostics = {
+        "fetched_count": len(raw_items),
+        "skipped_seen_count": skipped_seen,
+        "candidate_count": len(candidates),
+        "matched_count": len(matched_candidates),
+        "unmatched_count": max(0, len(candidates) - len(matched_candidates)),
+        "selected_count": len(items),
+        "output_limit": output_limit,
+        "fallback_used": fallback_used,
+        "zero_reason": zero_reason,
+        "keywords": keywords,
+        "top_candidates": [
+            {
+                "title": item.get("title"),
+                "hotness_score": item.get("hotness_score"),
+                "matched_keywords": item.get("matched_keywords", []),
+            }
+            for item in pool[:5]
+        ],
+    }
+    note(
+        "selection_done",
+        fetched_count=diagnostics["fetched_count"],
+        skipped_seen_count=skipped_seen,
+        candidate_count=len(candidates),
+        matched_count=len(matched_candidates),
+        selected_count=len(items),
+        fallback_used=fallback_used,
+        zero_reason=zero_reason,
+    )
+
+    for item in items:
+        item["cover_local_path"] = download_authorized_cover(item, task, asset_dir)
+        item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
+        ai_copy = maybe_ai_copy(item, task)
+        item["copy"] = ai_copy or template_copy(item, task)
+        item["copy_source"] = "ai" if ai_copy else "template"
+        item["delivery_links"] = list(task.get("owned_delivery_links", []))
+
     for index, item in enumerate(items, start=1):
         slug = f"{index:02d}-{safe_slug(item['title'])}"
         item_dir = run_dir / slug
         item_dir.mkdir(exist_ok=True)
         (item_dir / "copy.md").write_text(item["copy"], encoding="utf-8")
+        delivery_status = "可进入授权审核后的发布流程" if task.get("rights_confirmed") else "未确认分发权，禁止发布"
+        delivery_links = "\n".join(f"- {link}" for link in item["delivery_links"]) or "- 待填入你自己的授权网盘链接"
+        cover_info = (
+            f"- 本地：{item['cover_local_path']}"
+            if item.get("cover_local_path")
+            else f"- 公开封面地址（仅供人工核验）：{item.get('cover_url') or '无'}"
+        )
         delivery = (
             "# 发货信息（待审核）\n\n"
             f"商品：{item['title']}\n"
-            f"状态：{'可进入授权审核后的发布流程' if task.get('rights_confirmed') else '未确认分发权，禁止发布'}\n"
+            f"状态：{delivery_status}\n"
             "百度网盘交付链接：\n"
-            + ("\n".join(f"- {link}" for link in item["delivery_links"]) if item["delivery_links"] else "- 待填入你自己的授权网盘链接")
-            + "\n\n图片信息：\n"
-            + (f"- 本地：{item['cover_local_path']}" if item.get("cover_local_path") else f"- 公开封面地址（仅供人工核验）：{item.get('cover_url') or '无'}")
-            + "\n- 上架建议：使用你自己有权使用的封面图、课程目录长图或重新制作的说明图；公开来源图不要直接当作可商用素材。"
-            + "\n\n原始页面（仅作来源核验）：\n- "
-            + str(item.get("page_url") or "")
-            + "\n"
+            f"{delivery_links}\n\n"
+            "图片信息：\n"
+            f"{cover_info}\n"
+            "- 上架建议：使用你自己有权使用的封面图、课程目录长图或重新制作的说明图；公开来源图不要直接当作可商用素材。\n\n"
+            "原始页面（仅作来源核验）：\n"
+            f"- {item.get('page_url') or ''}\n"
         )
         (item_dir / "delivery.md").write_text(delivery, encoding="utf-8")
         (item_dir / "item.json").write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+        seen_record = {"run_id": run_id, "title": item.get("title")}
+        if item.get("id"):
+            task_seen[str(item["id"])] = seen_record
+            legacy_seen[str(item["id"])] = seen_record
 
+    note("run_complete", count=len(items), run_dir=str(run_dir))
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {
         "run_id": run_id,
-        "task_name": task.get("name"),
+        "task_name": task_name,
         "source": task.get("source"),
         "rights_review": "confirmed" if task.get("rights_confirmed") else "required",
         "count": len(items),
+        "diagnostics": diagnostics,
+        "run_log": run_log,
         "items": [
             {
                 "id": item["id"],
                 "title": item["title"],
                 "hotness_score": item["hotness_score"],
+                "matched_keywords": item.get("matched_keywords", []),
                 "page_url": item["page_url"],
                 "folder": str((run_dir / f"{index:02d}-{safe_slug(item['title'])}").relative_to(output_dir)).replace("\\", "/"),
             }
             for index, item in enumerate(items, start=1)
         ],
     }
+    (run_dir / "run.log").write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in run_log) + ("\n" if run_log else ""),
+        encoding="utf-8",
+    )
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 

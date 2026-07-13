@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+
+LOGGER = logging.getLogger("goofish_auto.server")
 
 try:
     from .goofish_tasks import (
@@ -165,6 +169,17 @@ function summarizeBootstrapResult(data){
     failed: list.filter(item => String(item.status || '').includes('failed')).length,
   };
 }
+function renderDiagnostics(data){
+  const d = data?.diagnostics || {};
+  if(!Object.keys(d).length) return '';
+  const zero = d.zero_reason ? `<p class="warn">0 条原因：${esc(d.zero_reason)}</p>` : '';
+  const fallback = d.fallback_used ? '<p class="warn">没有关键词命中，已启用兜底：从候选里按热度取最新内容，方便确认数据源是否正常。</p>' : '';
+  const top = (d.top_candidates || []).map(item => {
+    const matched = (item.matched_keywords || []).join(', ') || '无';
+    return `<li>${esc(item.title)} <small>热度 ${esc(item.hotness_score)}，命中：${esc(matched)}</small></li>`;
+  }).join('');
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已处理跳过 ${esc(d.skipped_seen_count ?? 0)} 条；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+}
 
 async function loadConfig(){
   const cfg = await api('/api/goofish/config');
@@ -190,7 +205,12 @@ async function runLocalTask(){
   const btn=$('runBtn'); btn.disabled=true; setStatus('localStatus','运行中，请稍等...');
   try{
     const data = await api('/api/local/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:$('localTask').value,include_seen:$('includeSeen').checked})});
-    setStatus('localStatus',`完成：${data.count || 0} 条，输出目录 ${data.run_id}`,'ok');
+    const reason = data.diagnostics?.zero_reason;
+    if((data.count || 0) === 0 && reason){
+      setStatus('localStatus',`完成但没有输出：${reason}`,'warn');
+    }else{
+      setStatus('localStatus',`完成：${data.count || 0} 条，输出目录 ${data.run_id}`,'ok');
+    }
     await loadRuns();
     await showRun(data.run_id);
   }catch(e){ setStatus('localStatus', e.message, 'bad'); }
@@ -200,6 +220,7 @@ async function showRun(runId){
   const data = await api(`/api/local/runs/${encodeURIComponent(runId)}`);
   const rows = (data.items || []).map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.hotness_score)}</td><td><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">来源</a></td><td><button class="secondary js-show-item" data-folder="${esc(item.folder)}">文案</button></td></tr>`).join('');
   $('runDetail').innerHTML = `<p><span class="pill">${esc(data.task_name)}</span> ${esc(data.count)} 条</p>` +
+    renderDiagnostics(data) +
     `<table><thead><tr><th>标题</th><th>热度</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   $('itemDetail').innerHTML = '';
 }
@@ -436,9 +457,20 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             body = self._json_body()
             if path in {"/api/run", "/api/local/run"}:
+                task_name = str(body["task"])
+                include_seen = bool(body.get("include_seen", False))
+                LOGGER.info("local_run request task=%s include_seen=%s", task_name, include_seen)
                 result = run_named_task(
-                    str(body["task"]),
-                    include_seen=bool(body.get("include_seen", False)),
+                    task_name,
+                    include_seen=include_seen,
+                )
+                diagnostics = result.get("diagnostics", {}) if isinstance(result, dict) else {}
+                LOGGER.info(
+                    "local_run done task=%s run_id=%s count=%s diagnostics=%s",
+                    task_name,
+                    result.get("run_id") if isinstance(result, dict) else "",
+                    result.get("count") if isinstance(result, dict) else "",
+                    diagnostics,
                 )
                 self._send(200, result)
             elif path == "/api/goofish/bootstrap/dry-run":
@@ -460,15 +492,21 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send(404, {"error": "not found"})
         except (KeyError, OSError, ValueError, GoofishAPIError, json.JSONDecodeError) as exc:
+            LOGGER.exception("request failed path=%s", getattr(self, "path", ""))
             self._send_error(400, exc)
 
     def log_message(self, fmt: str, *args: object) -> None:
-        print(fmt % args)
+        logging.getLogger("goofish_auto.http").info(fmt, *args)
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((host, port), Handler)
+    LOGGER.info("server_start url=http://%s:%s/ output_dir=%s", host, port, OUTPUT_DIR)
     print(f"控制台：http://{host}:{port}/")
     try:
         server.serve_forever()

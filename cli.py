@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -13,6 +14,10 @@ except ImportError:  # direct invocation: python resource_pipeline/cli.py
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     parser = argparse.ArgumentParser(description="本地热点监控与授权资源待审核流水线")
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -33,11 +33,12 @@
     "source_config": {
       "base_url": "https://theitzy.net",
       "per_page": 20,
-      "max_pages": 1,
+      "max_pages": 2,
       "request_interval_seconds": 10,
       "orderby": "date",
       "order": "desc"
     },
+    "output_limit": 20,
     "rights_confirmed": false,
     "authorized_assets": false,
     "owned_delivery_links": []
