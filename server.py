@@ -308,6 +308,9 @@ async function showItem(folder){
     const marketHtml = marketTerms
       ? `<p class="tiny">闲鱼匹配：${esc(marketTerms)}${data.item?.market_median_price ? `；中位价约 ¥${esc(data.item.market_median_price)}` : ''}</p>${marketRefs ? `<ul class="tiny">${marketRefs}</ul>` : ''}`
       : '<p class="tiny">暂无闲鱼市场匹配。</p>';
+    const sourceHtml = data.page_url
+      ? `<p class="tiny">来源核验：<a href="${esc(data.page_url)}" target="_blank" rel="noreferrer">课程页</a></p>`
+      : '<p class="tiny">这个条目没有公开课程页地址。</p>';
     detailRow.querySelector('td').innerHTML =
       `<div class="inline-copy-panel">
         <div class="inline-copy-head">
@@ -315,10 +318,12 @@ async function showItem(folder){
           <div class="inline-copy-actions">
             <button class="secondary mini js-copy-inline" data-field="copy_suggested">复制文案</button>
             <button class="secondary mini js-copy-inline" data-field="delivery">复制发货</button>
+            <button class="secondary mini js-copy-inline" data-field="page_url">复制来源链接</button>
             <button class="secondary mini js-show-full" data-folder="${esc(folder)}">看完整</button>
           </div>
         </div>
         ${marketHtml}
+        ${sourceHtml}
         ${imagePreview}
         <p class="copy-preview">${esc(copyText)}</p>
       </div>`;
@@ -331,7 +336,11 @@ async function showFullItem(folder){
   const imageHtml = data.cover_url
     ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">小图只是预览，图片源是原图。点图可新标签打开原图；手机上长按图片可保存原图。</p><a class="thumb-link" target="_blank" rel="noreferrer" href="${esc(data.cover_url)}"><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览" loading="lazy"></a></div>`
     : `<div class="image-box"><h3>图片信息</h3><p class="muted">这个条目没有公开封面地址。正式上架时建议补一张自有/授权封面图或目录图。</p></div>`;
+  const sourceHtml = data.page_url
+    ? `<h3>来源核验</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="page_url">复制来源链接</button></div><p><a target="_blank" rel="noreferrer" href="${esc(data.page_url)}">${esc(data.page_url)}</a></p>`
+    : `<h3>来源核验</h3><p class="muted">这个条目没有公开课程页地址。</p>`;
   $('itemDetail').innerHTML = imageHtml +
+    sourceHtml +
     `<h3>完整闲鱼文案</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_suggested">复制文案</button></div><pre>${esc(copyText)}</pre>` +
     `<h3>发货信息 delivery.md</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery">复制发货信息</button></div><pre>${esc(data.delivery)}</pre>`;
   $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
