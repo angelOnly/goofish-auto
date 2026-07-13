@@ -411,10 +411,9 @@ function renderPublishedItems(items, query=''){
       <td>
         <button class="secondary mini js-copy-published" data-index="${index}" data-field="copy_display">复制文案</button>
         <button class="secondary mini js-copy-published" data-index="${index}" data-field="delivery_payload">复制发货</button>
-        <button class="secondary mini js-edit-delivery" data-index="${index}">${item.delivery_payload ? '编辑发货' : '添加发货'}</button>
-        <button class="secondary mini js-preview-published" data-index="${index}">看内容</button>
+        <button class="secondary mini js-toggle-published-detail" data-index="${index}">展开</button>
       </td>
-    </tr>`;
+    </tr><tr class="published-detail-row" data-published-detail="${index}" style="display:none"><td colspan="4"></td></tr>`;
   }).join('');
   $('publishedResults').innerHTML = `<table><thead><tr><th>标题</th><th>发货状态</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
@@ -425,6 +424,9 @@ function manualDeliveryEditorHtml(item){
     <div class="copy-actions">
       <button class="secondary mini js-save-manual-delivery" data-course-id="${esc(item.id || '')}">保存发货链接</button>
     </div>`;
+}
+function publishedDetailRowFor(index){
+  return document.querySelector(`.published-detail-row[data-published-detail="${CSS.escape(String(index))}"]`);
 }
 function previewPublishedItem(index, editDelivery=false){
   const item = publishedItems[Number(index)];
@@ -437,13 +439,41 @@ function previewPublishedItem(index, editDelivery=false){
   const sourceHtml = item.page_url
     ? `<h3>来源核验</h3><p><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">${esc(item.page_url)}</a></p>`
     : '';
-  $('itemDetail').innerHTML =
-    `<h3>已发布商品</h3><p><strong>${esc(item.title)}</strong><br><small>${esc(item.published_at || '')}</small></p>` +
+  const html =
+    `<div class="inline-copy-panel"><h3>已发布商品</h3><p><strong>${esc(item.title)}</strong><br><small>${esc(item.published_at || '')}</small></p>` +
     deliveryHtml +
     editorHtml +
     `<h3>完整闲鱼文案 ${copySourceLabel(item.copy_source)}</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_display">复制文案</button></div><pre>${esc(item.copy_display || '')}</pre>` +
-    sourceHtml;
-  $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
+    sourceHtml +
+    `</div>`;
+  const detailRow = publishedDetailRowFor(index);
+  if(detailRow){
+    detailRow.style.display = '';
+    detailRow.querySelector('td').innerHTML = html;
+    document.querySelectorAll('.js-toggle-published-detail').forEach(btn => {
+      if(btn.dataset.index === String(index)) btn.textContent = '收起';
+    });
+  }else{
+    $('itemDetail').innerHTML = html;
+    $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
+  }
+}
+function togglePublishedDetail(index){
+  const row = publishedDetailRowFor(index);
+  const button = [...document.querySelectorAll('.js-toggle-published-detail')].find(btn => btn.dataset.index === String(index));
+  if(!row) return;
+  if(row.style.display !== 'none'){
+    row.style.display = 'none';
+    row.querySelector('td').innerHTML = '';
+    if(button) button.textContent = '展开';
+    return;
+  }
+  document.querySelectorAll('.published-detail-row').forEach(detail => {
+    detail.style.display = 'none';
+    detail.querySelector('td').innerHTML = '';
+  });
+  document.querySelectorAll('.js-toggle-published-detail').forEach(btn => btn.textContent = '展开');
+  previewPublishedItem(index, false);
 }
 async function saveManualDelivery(courseId, button=null){
   const textarea = $('manualDeliveryText');
@@ -684,8 +714,7 @@ document.addEventListener('click', (event) => {
     const item = publishedItems[Number(target.dataset.index)];
     copyText(item?.[target.dataset.field], target.textContent.trim(), target);
   }
-  else if(target.classList.contains('js-edit-delivery')) previewPublishedItem(target.dataset.index, true);
-  else if(target.classList.contains('js-preview-published')) previewPublishedItem(target.dataset.index);
+  else if(target.classList.contains('js-toggle-published-detail')) togglePublishedDetail(target.dataset.index);
   else if(target.classList.contains('js-show-manual-editor')){
     const index = publishedItems.findIndex(item => item.id === currentItem?.id);
     if(index >= 0) previewPublishedItem(index, true);
