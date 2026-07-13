@@ -1,14 +1,36 @@
+x-app-build: &app-build
+  context: .
+  dockerfile_inline: |
+    FROM python:3.12-slim
+
+    ENV PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONUNBUFFERED=1
+
+    WORKDIR /app
+
+    COPY requirements.txt /tmp/requirements.txt
+    RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+    COPY . /app
+
+    RUN mkdir -p /app/output \
+        && useradd --create-home --uid 10001 appuser \
+        && chown -R appuser:appuser /app
+
+    USER appuser
+    EXPOSE 8765
+
 services:
   pipeline:
-    build:
-      context: .
+    image: goofish-auto:local
+    build: *app-build
     container_name: goofish-resource-pipeline
     restart: unless-stopped
     command: ["python", "cli.py", "serve", "--host", "0.0.0.0", "--port", "8765"]
     ports:
       - "8765:8765"
     volumes:
-      - ./:/app
+      - ${GOOFISH_OUTPUT_MOUNT:-goofish-output}:/app/output
     environment:
       PIPELINE_HOST: 0.0.0.0
       PIPELINE_PORT: "8765"
@@ -21,11 +43,14 @@ services:
       GOOFISH_POLL_SECONDS: ${GOOFISH_POLL_SECONDS:-2}
       GOOFISH_MAX_WAIT_SECONDS: ${GOOFISH_MAX_WAIT_SECONDS:-1800}
 
+volumes:
+  goofish-output:
+
   # One-shot task bootstrap. It is behind a profile so a normal `up -d`
   # does not unexpectedly call the remote task API.
   goofish-bootstrap:
-    build:
-      context: .
+    image: goofish-auto:local
+    build: *app-build
     profiles: ["bootstrap"]
     command: ["python", "cli.py", "goofish-create", "--config", "/app/goofish_tasks.json", "--start"]
     environment:
