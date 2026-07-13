@@ -32,6 +32,25 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(snapshot["status"], "done")
         self.assertEqual(snapshot["result"]["run_id"], "run-1")
 
+    def test_list_run_summaries_paginates_three_per_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            for index in range(7):
+                run_id = f"20260714-00000{index}"
+                run_dir = output_dir / run_id
+                run_dir.mkdir(parents=True)
+                (run_dir / "summary.json").write_text(
+                    json.dumps({"run_id": run_id, "task_name": "任务", "count": index}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            with patch.object(server, "OUTPUT_DIR", output_dir):
+                page_two = server._list_run_summaries(page=2, page_size=3)
+        self.assertEqual(page_two["total"], 7)
+        self.assertEqual(page_two["total_pages"], 3)
+        self.assertEqual(page_two["page"], 2)
+        self.assertEqual(page_two["count"], 3)
+        self.assertEqual(page_two["items"][0]["run_id"], "20260714-000003")
+
     def test_list_published_items_includes_delivery_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)

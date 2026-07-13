@@ -163,6 +163,8 @@ let publishedItems = [];
 let publishedPage = 1;
 let publishedPageSize = 10;
 let publishedTotal = 0;
+let runsPage = 1;
+let runsPageSize = 3;
 let expandedFolder = null;
 
 function esc(value){
@@ -334,13 +336,27 @@ async function loadLocalTasks(){
   const tasks = await api('/api/local/tasks');
   $('localTask').innerHTML = tasks.map(t => `<option>${esc(t.name)}</option>`).join('');
 }
-async function loadRuns(){
-  const runs = await api('/api/local/runs');
-  $('latestRunText').textContent = runs[0]?.run_id || '暂无';
+async function loadRuns(page=runsPage){
+  runsPage = Math.max(1, Number(page || 1));
+  const data = await api(`/api/local/runs?page=${encodeURIComponent(runsPage)}&page_size=${encodeURIComponent(runsPageSize)}`);
+  const runs = Array.isArray(data) ? data : (data.items || []);
+  const total = Array.isArray(data) ? runs.length : Number(data.total || 0);
+  const totalPages = Array.isArray(data) ? 1 : Number(data.total_pages || 1);
+  runsPage = Array.isArray(data) ? 1 : Number(data.page || runsPage);
+  $('latestRunText').textContent = runs[0]?.run_id || (runsPage > 1 ? `第${runsPage}页` : '暂无');
   if(!runs.length){ $('runs').innerHTML = '<p class="muted">还没有运行记录。</p>'; return; }
+  const pager = totalPages > 1
+    ? `<div class="row">
+        <button class="secondary mini js-runs-page" data-page="1" ${runsPage <= 1 ? 'disabled' : ''}>首页</button>
+        <button class="secondary mini js-runs-page" data-page="${runsPage - 1}" ${runsPage <= 1 ? 'disabled' : ''}>上一页</button>
+        <span class="muted">第 ${esc(runsPage)} / ${esc(totalPages)} 页，共 ${esc(total)} 次</span>
+        <button class="secondary mini js-runs-page" data-page="${runsPage + 1}" ${runsPage >= totalPages ? 'disabled' : ''}>下一页</button>
+        <button class="secondary mini js-runs-page" data-page="${totalPages}" ${runsPage >= totalPages ? 'disabled' : ''}>末页</button>
+      </div>`
+    : `<p class="muted">共 ${esc(total)} 次运行</p>`;
   $('runs').innerHTML = '<h3>最近运行</h3><table><thead><tr><th>时间</th><th>任务</th><th>数量</th><th></th></tr></thead><tbody>' +
     runs.map(r => `<tr><td>${esc(r.run_id)}</td><td>${esc(r.task_name)}</td><td>${esc(r.count)}</td><td><button class="secondary js-show-run" data-run-id="${esc(r.run_id)}">查看</button></td></tr>`).join('') +
-    '</tbody></table>';
+    `</tbody></table>${pager}`;
 }
 async function runLocalTask(){
   const btn=$('runBtn'); btn.disabled=true; setStatus('localStatus','运行中，请稍等...');
@@ -353,7 +369,7 @@ async function runLocalTask(){
     }else{
       setStatus('localStatus',`完成：${result.count || 0} 条，输出目录 ${result.run_id}`,'ok');
     }
-    await loadRuns();
+    await loadRuns(1);
     await showRun(result.run_id);
   }catch(e){ setStatus('localStatus', e.message, 'bad'); }
   finally{ btn.disabled=false; }
@@ -739,6 +755,7 @@ document.addEventListener('click', (event) => {
   else if(target.id === 'searchPublishedBtn') loadPublishedItems(1);
   else if(target.id === 'clearPublishedBtn'){ $('publishedQuery').value=''; loadPublishedItems(1); }
   else if(target.classList.contains('js-published-page')) loadPublishedItems(Number(target.dataset.page || 1));
+  else if(target.classList.contains('js-runs-page')) loadRuns(Number(target.dataset.page || 1));
   else if(target.classList.contains('js-show-run')) showRun(target.dataset.runId);
   else if(target.classList.contains('js-show-item')) showItem(target.dataset.folder);
   else if(target.classList.contains('js-copy-field')) copyText(currentItem?.[target.dataset.field], target.textContent.trim(), target);
@@ -993,6 +1010,32 @@ def _list_published_items(query: str = "", limit: int = 10, page: int = 1) -> di
     }
 
 
+def _list_run_summaries(page: int = 1, page_size: int = 3) -> dict[str, object]:
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 3), 20))
+    summary_paths = sorted(OUTPUT_DIR.glob("*/summary.json"), reverse=True)
+    total = len(summary_paths)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    offset = (page - 1) * page_size
+    items: list[dict[str, object]] = []
+    for summary_path in summary_paths[offset : offset + page_size]:
+        try:
+            value = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            items.append(value)
+    return {
+        "items": items,
+        "count": len(items),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
 def _save_manual_delivery(course_id: str, delivery_payload: str) -> dict[str, object]:
     course_id = (course_id or "").strip()
     delivery_payload = (delivery_payload or "").strip()
@@ -1125,13 +1168,18 @@ class Handler(BaseHTTPRequestHandler):
             elif path in {"/api/tasks", "/api/local/tasks"}:
                 self._send(200, load_tasks())
             elif path in {"/api/runs", "/api/local/runs"}:
-                summaries = []
-                for summary_path in sorted(OUTPUT_DIR.glob("*/summary.json"), reverse=True)[:30]:
-                    try:
-                        summaries.append(json.loads(summary_path.read_text(encoding="utf-8")))
-                    except json.JSONDecodeError:
-                        pass
-                self._send(200, summaries)
+                query = parse_qs(parsed.query)
+                page_text = (query.get("page") or ["1"])[0]
+                page_size_text = (query.get("page_size") or ["3"])[0]
+                try:
+                    page = int(page_text)
+                except ValueError:
+                    page = 1
+                try:
+                    page_size = int(page_size_text)
+                except ValueError:
+                    page_size = 3
+                self._send(200, _list_run_summaries(page, page_size))
             elif path.startswith("/api/runs/") or path.startswith("/api/local/runs/"):
                 run_id = path.rsplit("/", 1)[-1]
                 summary_path = OUTPUT_DIR / run_id / "summary.json"
