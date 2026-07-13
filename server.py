@@ -134,12 +134,18 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     <h2>已发布内容查询</h2>
     <div class="row">
       <input id="publishedQuery" type="search" placeholder="搜标题、课程地址或ID" style="min-width:280px">
+      <select id="publishedPageSize">
+        <option value="10">每页10条</option>
+        <option value="20">每页20条</option>
+        <option value="50">每页50条</option>
+      </select>
       <button id="searchPublishedBtn">查询已发布</button>
       <button class="secondary" id="clearPublishedBtn">清空搜索</button>
     </div>
     <div class="help">这里直接查询本地 SQLite 里标记为“已发布”的商品，不依赖最近一次运行结果。用于后续买家发货时快速复制闲鱼文案或百度网盘发货信息。</div>
     <div id="publishedStatus" class="status"></div>
     <div id="publishedResults" class="muted">点击“查询已发布”查看已发布商品。</div>
+    <div id="publishedPager" class="row"></div>
   </section>
 
   <section class="panel">
@@ -154,6 +160,9 @@ const $ = (id) => document.getElementById(id);
 let goofishUrls = {tasks_url:'https://goofish.xiaolicloud.cn:18443/tasks?create=1', results_url:'https://goofish.xiaolicloud.cn:18443/results'};
 let currentItem = null;
 let publishedItems = [];
+let publishedPage = 1;
+let publishedPageSize = 10;
+let publishedTotal = 0;
 let expandedFolder = null;
 
 function esc(value){
@@ -382,17 +391,24 @@ async function showRun(runId){
     `<table><thead><tr><th>标题</th><th>热度</th><th>市场匹配</th><th>同行价</th><th>发布状态</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   $('itemDetail').innerHTML = '';
 }
-async function loadPublishedItems(){
+async function loadPublishedItems(page=publishedPage){
   const query = $('publishedQuery').value.trim();
+  publishedPageSize = Number($('publishedPageSize')?.value || publishedPageSize || 10);
+  publishedPage = Math.max(1, Number(page || 1));
   setStatus('publishedStatus','正在查询已发布内容...');
   try{
-    const data = await api(`/api/local/published?q=${encodeURIComponent(query)}&limit=120`);
+    const data = await api(`/api/local/published?q=${encodeURIComponent(query)}&page=${encodeURIComponent(publishedPage)}&page_size=${encodeURIComponent(publishedPageSize)}`);
     publishedItems = data.items || [];
+    publishedPage = data.page || publishedPage;
+    publishedPageSize = data.page_size || publishedPageSize;
+    publishedTotal = data.total || data.count || 0;
     renderPublishedItems(publishedItems, query);
-    setStatus('publishedStatus',`已发布 ${publishedItems.length} 条${query ? `，搜索：${query}` : ''}`,'ok');
+    renderPublishedPager(data);
+    setStatus('publishedStatus',`已发布共 ${publishedTotal} 条，当前 ${publishedItems.length} 条${query ? `，搜索：${query}` : ''}`,'ok');
   }catch(e){
     publishedItems = [];
     $('publishedResults').innerHTML = '<p class="muted">查询失败。</p>';
+    $('publishedPager').innerHTML = '';
     setStatus('publishedStatus', e.message, 'bad');
   }
 }
@@ -416,6 +432,22 @@ function renderPublishedItems(items, query=''){
     </tr><tr class="published-detail-row" data-published-detail="${index}" style="display:none"><td colspan="4"></td></tr>`;
   }).join('');
   $('publishedResults').innerHTML = `<table><thead><tr><th>标题</th><th>发货状态</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderPublishedPager(data){
+  const total = Number(data.total || 0);
+  const page = Number(data.page || 1);
+  const totalPages = Math.max(1, Number(data.total_pages || 1));
+  if(!total){
+    $('publishedPager').innerHTML = '';
+    return;
+  }
+  $('publishedPager').innerHTML = `
+    <button class="secondary mini js-published-page" data-page="1" ${page <= 1 ? 'disabled' : ''}>首页</button>
+    <button class="secondary mini js-published-page" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+    <span class="muted">第 ${esc(page)} / ${esc(totalPages)} 页，共 ${esc(total)} 条</span>
+    <button class="secondary mini js-published-page" data-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>下一页</button>
+    <button class="secondary mini js-published-page" data-page="${totalPages}" ${page >= totalPages ? 'disabled' : ''}>末页</button>
+  `;
 }
 function manualDeliveryEditorHtml(item){
   return `<h3>手动补充发货</h3>
@@ -704,8 +736,9 @@ document.addEventListener('click', (event) => {
   else if(target.id === 'openTasksBtn') openUrl(goofishUrls.tasks_url);
   else if(target.id === 'openResultsBtn' || target.classList.contains('js-open-results')) openUrl(goofishUrls.results_url);
   else if(target.id === 'openPublishedBtn') $('publishedPanel').scrollIntoView({behavior:'smooth', block:'start'});
-  else if(target.id === 'searchPublishedBtn') loadPublishedItems();
-  else if(target.id === 'clearPublishedBtn'){ $('publishedQuery').value=''; loadPublishedItems(); }
+  else if(target.id === 'searchPublishedBtn') loadPublishedItems(1);
+  else if(target.id === 'clearPublishedBtn'){ $('publishedQuery').value=''; loadPublishedItems(1); }
+  else if(target.classList.contains('js-published-page')) loadPublishedItems(Number(target.dataset.page || 1));
   else if(target.classList.contains('js-show-run')) showRun(target.dataset.runId);
   else if(target.classList.contains('js-show-item')) showItem(target.dataset.folder);
   else if(target.classList.contains('js-copy-field')) copyText(currentItem?.[target.dataset.field], target.textContent.trim(), target);
@@ -726,7 +759,10 @@ document.addEventListener('click', (event) => {
   else if(target.classList.contains('js-stop-remote')) stopRemoteTask(target.dataset.taskId);
 });
 document.addEventListener('keydown', (event) => {
-  if(event.key === 'Enter' && event.target?.id === 'publishedQuery') loadPublishedItems();
+  if(event.key === 'Enter' && event.target?.id === 'publishedQuery') loadPublishedItems(1);
+});
+document.addEventListener('change', (event) => {
+  if(event.target?.id === 'publishedPageSize') loadPublishedItems(1);
 });
 window.addEventListener('error', (event) => setStatus('localStatus', `页面脚本错误：${event.message}`, 'bad'));
 refreshAll();
@@ -914,11 +950,12 @@ def _published_item_payload(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def _list_published_items(query: str = "", limit: int = 80) -> dict[str, object]:
+def _list_published_items(query: str = "", limit: int = 10, page: int = 1) -> dict[str, object]:
     db_path = selection_db_path(OUTPUT_DIR)
-    limit = max(1, min(int(limit or 80), 200))
+    limit = max(1, min(int(limit or 10), 100))
+    page = max(1, int(page or 1))
     if not db_path.exists():
-        return {"items": [], "count": 0, "query": query, "limit": limit}
+        return {"items": [], "count": 0, "total": 0, "query": query, "limit": limit, "page": page, "page_size": limit, "total_pages": 1}
     where = "published = 1"
     params: list[object] = []
     query = (query or "").strip()
@@ -928,6 +965,10 @@ def _list_published_items(query: str = "", limit: int = 80) -> dict[str, object]
         params.extend([like, like, like])
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
+        total = int(conn.execute(f"SELECT COUNT(*) FROM course_selections WHERE {where}", params).fetchone()[0] or 0)
+        total_pages = max(1, (total + limit - 1) // limit)
+        page = min(page, total_pages)
+        offset = (page - 1) * limit
         rows = conn.execute(
             f"""
             SELECT course_id, title, source, page_url, published_at, last_selected_at,
@@ -935,12 +976,21 @@ def _list_published_items(query: str = "", limit: int = 80) -> dict[str, object]
             FROM course_selections
             WHERE {where}
             ORDER BY COALESCE(published_at, updated_at, last_selected_at) DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            [*params, limit],
+            [*params, limit, offset],
         ).fetchall()
     items = [_published_item_payload(row) for row in rows]
-    return {"items": items, "count": len(items), "query": query, "limit": limit}
+    return {
+        "items": items,
+        "count": len(items),
+        "total": total,
+        "query": query,
+        "limit": limit,
+        "page_size": limit,
+        "page": page,
+        "total_pages": total_pages,
+    }
 
 
 def _save_manual_delivery(course_id: str, delivery_payload: str) -> dict[str, object]:
@@ -1096,12 +1146,17 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/local/published":
                 query = parse_qs(parsed.query)
                 q = (query.get("q") or [""])[0]
-                limit_text = (query.get("limit") or ["80"])[0]
+                limit_text = (query.get("page_size") or query.get("limit") or ["10"])[0]
+                page_text = (query.get("page") or ["1"])[0]
                 try:
                     limit = int(limit_text)
                 except ValueError:
-                    limit = 80
-                self._send(200, _list_published_items(q, limit))
+                    limit = 10
+                try:
+                    page = int(page_text)
+                except ValueError:
+                    page = 1
+                self._send(200, _list_published_items(q, limit, page))
             elif path == "/api/local/run-status":
                 query = parse_qs(parsed.query)
                 job_id = (query.get("job_id") or query.get("id") or [""])[0]

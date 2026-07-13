@@ -102,6 +102,65 @@ class ServerTests(unittest.TestCase):
         self.assertIn("https://pan.baidu.com/s/1abc", data["items"][0]["delivery_payload"])
         self.assertIn("p123", data["items"][0]["delivery_payload"])
 
+    def test_list_published_items_paginates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            db_path = output_dir / "selection.sqlite3"
+            conn = sqlite3.connect(db_path)
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE course_selections (
+                            course_id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            source TEXT,
+                            page_url TEXT,
+                            first_selected_at TEXT NOT NULL,
+                            last_selected_at TEXT NOT NULL,
+                            last_run_id TEXT,
+                            last_task_name TEXT,
+                            selection_count INTEGER NOT NULL DEFAULT 0,
+                            published INTEGER NOT NULL DEFAULT 0,
+                            published_at TEXT,
+                            updated_at TEXT NOT NULL,
+                            last_hotness_score REAL,
+                            last_market_match_score REAL,
+                            raw_json TEXT
+                        )
+                        """
+                    )
+                    for index in range(25):
+                        conn.execute(
+                            """
+                            INSERT INTO course_selections (
+                                course_id, title, source, page_url, first_selected_at, last_selected_at,
+                                selection_count, published, published_at, updated_at, raw_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                f"theitzy:{index:02d}",
+                                f"课程 {index:02d}",
+                                "theitzy",
+                                f"https://theitzy.net/{index:02d}/",
+                                "2026-07-14T00:00:00+08:00",
+                                "2026-07-14T00:00:00+08:00",
+                                1,
+                                1,
+                                f"2026-07-14T00:{index:02d}:00+08:00",
+                                f"2026-07-14T00:{index:02d}:00+08:00",
+                                json.dumps({"id": f"theitzy:{index:02d}", "title": f"课程 {index:02d}"}, ensure_ascii=False),
+                            ),
+                        )
+            finally:
+                conn.close()
+            with patch.object(server, "OUTPUT_DIR", output_dir):
+                page_two = server._list_published_items("", 10, 2)
+        self.assertEqual(page_two["total"], 25)
+        self.assertEqual(page_two["total_pages"], 3)
+        self.assertEqual(page_two["page"], 2)
+        self.assertEqual(page_two["count"], 10)
+
     def test_delivery_payload_contains_only_link_and_password(self):
         payload, status = _delivery_payload(
             {
