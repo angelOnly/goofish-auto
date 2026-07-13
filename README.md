@@ -11,17 +11,17 @@
 ```powershell
 cd E:\ai\skills\xinli\resource_pipeline
 python .\cli.py list
-python .\cli.py run --task "AI数字产品选品整理"
+python .\cli.py run --task "AI虚拟课程选品整理"
 python .\cli.py serve
 ```
 
 然后打开 `http://127.0.0.1:8765/`。TheItzy 的 robots.txt 声明了 10 秒 crawl-delay，所以默认每次请求间隔 10 秒；不要通过并发、代理轮换或改 User-Agent 绕过限制。
 
-本地整理任务会在页面“运行诊断”里显示抓取数、已处理跳过数、关键词命中数和最终输出数；容器日志也会打印每页抓取、筛选和完成状态。若输出为 0，优先看诊断里的 `zero_reason`，常见原因是本次抓到的文章都已经处理过，此时可以勾选“包含已处理”复查。
+本地整理任务默认只看近 15 天 TheItzy 公开元数据，并优先筛选 AI 课程、教程、资料、项目实战等虚拟产品方向；会排除远程安装配置、账号卡密、实体商品等不适合的内容。页面“运行诊断”会显示抓取数、已处理跳过数、超过时效过滤数、排除词过滤数、关键词命中数和最终输出数；容器日志也会打印每页抓取、筛选和完成状态。若输出为 0，优先看诊断里的 `zero_reason`。
 
 ## 自动创建闲鱼热点监控任务
 
-`goofish_tasks.json` 是批量任务配置，现在只保留 2 个低成本监控任务：1 个关键词快速筛选任务 + 1 个 AI 文本判断任务。两者都关闭图片分析（`analyze_images=false`），默认每 12 小时执行一次（`0 */12 * * *`）。同步器会先调用 `GET /api/tasks` 按任务名去重；AI 任务再调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
+`goofish_tasks.json` 是批量任务配置，现在只保留 2 个监控任务：1 个关键词快速筛选任务 + 1 个 AI 文本判断任务。两者都关闭图片分析（`analyze_images=false`），搜索词收敛为 `AI课程`，上新范围使用闲鱼监控项目支持的 `new_publish_option=14天内`，默认每 12 小时执行一次（`0 */12 * * *`）。任务口径只推荐虚拟课程/教程/资料/项目实战类商品，排除远程安装配置、账号卡密、实体商品、磨茧神器等无关内容。同步器会先调用 `GET /api/tasks` 按任务名去重；AI 任务再调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
 
 先预览请求，不访问远端：
 
@@ -44,7 +44,7 @@ python .\cli.py goofish-create --start
 只同步某个任务：
 
 ```powershell
-python .\cli.py goofish-create --task "AI数字产品核心热点" --start
+python .\cli.py goofish-create --task "近15天AI虚拟课程核心热点" --start
 ```
 
 默认 API 地址是 `https://goofish.xiaolicloud.cn:18443`，也可以通过 `.env` 中的 `GOOFISH_API_BASE_URL` 覆盖。当前接口按你贴出的说明没有额外 Token 校验；如果你在反向代理前加了鉴权，可填写 `GOOFISH_API_TOKEN`。不要把没有鉴权的管理接口直接暴露到公网。
@@ -105,7 +105,7 @@ docker compose down
 日志里重点看这些字段：
 
 - `fetch_theitzy response page=... count=...`：TheItzy 每页实际返回多少条。
-- `selection_done`：抓取数、跳过数、候选数、关键词命中数、最终输出数。
+- `selection_done`：抓取数、跳过数、超过时效过滤数、排除词过滤数、候选数、关键词命中数、最终输出数。
 - `zero_reason`：输出 0 条时的直接原因。
 
 `goofish-bootstrap` 默认会创建不存在的任务并启动新任务；重复执行会按任务名跳过已有任务。若只想查看提交内容，可在宿主机执行 `python .\cli.py goofish-create --dry-run`，避免误调用远端 API。远端已经存在的旧重复任务不会被自动删除或停止，需要在 Web 控制台或闲鱼监控后台里手动处理。

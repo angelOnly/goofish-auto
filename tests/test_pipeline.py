@@ -86,6 +86,42 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(skipped["count"], 0)
             self.assertEqual(skipped["diagnostics"]["skipped_seen_count"], 1)
 
+    def test_run_filters_old_and_excluded_items(self):
+        raw = [
+            {
+                "id": "theitzy:old",
+                "title": "AI 课程旧资料",
+                "page_url": "https://theitzy.net/old/",
+                "published_at": "2000-01-01T00:00:00+00:00",
+                "categories": ["AI"],
+                "summary": "项目实战",
+                "cover_url": "",
+            },
+            {
+                "id": "theitzy:remote",
+                "title": "AI 课程远程安装配置",
+                "page_url": "https://theitzy.net/remote/",
+                "published_at": "2999-01-01T00:00:00+00:00",
+                "categories": ["AI"],
+                "summary": "项目实战",
+                "cover_url": "",
+            },
+        ]
+        task = {
+            "name": "过滤测试",
+            "source": "theitzy",
+            "keywords": ["AI课程", "项目实战"],
+            "exclude_keywords": ["远程安装"],
+            "max_age_days": 15,
+            "source_config": {"base_url": "https://theitzy.net"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pipeline, "fetch_source", return_value=raw):
+                summary = run_task(task, output_dir=Path(tmp), include_seen=True)
+            self.assertEqual(summary["count"], 0)
+            self.assertEqual(summary["diagnostics"]["skipped_old_count"], 1)
+            self.assertEqual(summary["diagnostics"]["skipped_excluded_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

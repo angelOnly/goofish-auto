@@ -239,13 +239,7 @@ def fetch_source(task: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def score_item(item: Dict[str, Any], keywords: Iterable[str]) -> Dict[str, Any]:
-    text = " ".join(
-        [
-            str(item.get("title", "")),
-            " ".join(str(value) for value in item.get("categories", [])),
-            str(item.get("summary", "")),
-        ]
-    ).lower()
+    text = item_search_text(item)
     terms = [str(value).strip().lower() for value in keywords if str(value).strip()]
     matched: List[str] = []
     for term in terms:
@@ -277,6 +271,21 @@ def score_item(item: Dict[str, Any], keywords: Iterable[str]) -> Dict[str, Any]:
             *("有封面素材" for _ in [0] if item.get("cover_url")),
         ],
     }
+
+
+def item_search_text(item: Dict[str, Any]) -> str:
+    return " ".join(
+        [
+            str(item.get("title", "")),
+            " ".join(str(value) for value in item.get("categories", [])),
+            str(item.get("summary", "")),
+        ]
+    ).lower()
+
+
+def matches_any_keyword(item: Dict[str, Any], keywords: Iterable[str]) -> bool:
+    text = item_search_text(item)
+    return any(str(value).strip().lower() in text for value in keywords if str(value).strip())
 
 
 def safe_slug(value: str) -> str:
@@ -444,6 +453,9 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     asset_dir = run_dir / "assets"
     asset_dir.mkdir(exist_ok=True)
     keywords = [str(value) for value in task.get("keywords", []) if str(value).strip()]
+    exclude_keywords = [str(value) for value in task.get("exclude_keywords", []) if str(value).strip()]
+    max_age_days_raw = task.get("max_age_days")
+    max_age_days = float(max_age_days_raw) if max_age_days_raw not in {None, ""} else None
     output_limit = max(1, min(int(task.get("output_limit", 20)), 100))
     run_log: List[Dict[str, Any]] = []
 
@@ -461,12 +473,16 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         source=task.get("source"),
         include_seen=include_seen,
         keyword_count=len(keywords),
+        exclude_keyword_count=len(exclude_keywords),
+        max_age_days=max_age_days,
         output_limit=output_limit,
     )
     raw_items = fetch_source(task)
     note("source_fetched", fetched_count=len(raw_items))
 
     skipped_seen = 0
+    skipped_old = 0
+    skipped_excluded = 0
     candidates: List[Dict[str, Any]] = []
     for raw in raw_items:
         item_id = str(raw.get("id") or "")
@@ -474,6 +490,12 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             skipped_seen += 1
             continue
         scored = score_item(raw, keywords)
+        if max_age_days is not None and float(scored.get("age_days", 365.0)) > max_age_days:
+            skipped_old += 1
+            continue
+        if exclude_keywords and matches_any_keyword(scored, exclude_keywords):
+            skipped_excluded += 1
+            continue
         candidates.append(scored)
 
     matched_candidates = [item for item in candidates if item.get("matched_keywords")]
@@ -487,6 +509,10 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         zero_reason = "数据源没有返回文章，请检查 TheItzy API、网络或站点状态。"
     elif skipped_seen == len(raw_items) and not include_seen:
         zero_reason = "本次抓到的文章都已经在这个任务里处理过；如需复查旧数据，请勾选“包含已处理”。"
+    elif skipped_old and not candidates:
+        zero_reason = f"本次抓到的文章都超过 {int(max_age_days or 0)} 天时效；已按新发布虚拟产品口径过滤。"
+    elif skipped_excluded and not candidates:
+        zero_reason = "本次抓到的文章都命中了排除词；已过滤远程安装、账号卡密、实体商品等不适合方向。"
     elif not candidates:
         zero_reason = "抓到了文章，但没有可参与评分的候选项。"
     elif not items:
@@ -495,6 +521,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     diagnostics = {
         "fetched_count": len(raw_items),
         "skipped_seen_count": skipped_seen,
+        "skipped_old_count": skipped_old,
+        "skipped_excluded_count": skipped_excluded,
         "candidate_count": len(candidates),
         "matched_count": len(matched_candidates),
         "unmatched_count": max(0, len(candidates) - len(matched_candidates)),
@@ -503,6 +531,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         "fallback_used": fallback_used,
         "zero_reason": zero_reason,
         "keywords": keywords,
+        "exclude_keywords": exclude_keywords,
+        "max_age_days": max_age_days,
         "top_candidates": [
             {
                 "title": item.get("title"),
@@ -516,6 +546,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         "selection_done",
         fetched_count=diagnostics["fetched_count"],
         skipped_seen_count=skipped_seen,
+        skipped_old_count=skipped_old,
+        skipped_excluded_count=skipped_excluded,
         candidate_count=len(candidates),
         matched_count=len(matched_candidates),
         selected_count=len(items),

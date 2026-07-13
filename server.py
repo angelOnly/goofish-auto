@@ -80,7 +80,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
         <label class="row"><input id="includeSeen" type="checkbox"> 包含已处理</label>
         <button id="runBtn">运行一次</button>
       </div>
-      <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI数字产品选品整理”任务；它会生成待审核文案和发货说明。下面的“闲鱼热点监控”才是远程闲鱼监控任务。</div>
+      <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI虚拟课程选品整理”任务；默认只看近 15 天、课程/教程/资料/项目实战类内容，并排除远程安装、账号卡密和实体商品。下面的“闲鱼热点监控”才是远程闲鱼监控任务。</div>
       <div id="localStatus" class="status"></div>
       <div id="runs"></div>
     </div>
@@ -92,7 +92,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
         <button class="secondary" id="previewBootstrapBtn">预览本地配置</button>
         <button id="startBootstrapBtn">创建缺失任务到闲鱼监控</button>
       </div>
-      <div class="help">“预览本地配置”只查看将要提交的 2 个任务，不会创建。“创建缺失任务到闲鱼监控”会调用远程 API：远程没有同名任务就创建并启动，已有同名任务就跳过，不会更新或覆盖旧任务。当前配置已关闭图片分析（analyze_images=false），cron 为 `0 */12 * * *`，表示每 12 小时一次。</div>
+      <div class="help">“预览本地配置”只查看将要提交的 2 个任务，不会创建。“创建缺失任务到闲鱼监控”会调用远程 API：远程没有同名任务就创建并启动，已有同名任务就跳过，不会更新或覆盖旧任务。当前监控只看虚拟课程/资料/项目实战类商品，排除远程安装、账号卡密和实体商品；上新范围使用 `14天内`，cron 为 `0 */12 * * *`。</div>
       <div id="goofishStatus" class="status"></div>
       <div id="goofishTasks"></div>
     </div>
@@ -178,7 +178,9 @@ function renderDiagnostics(data){
     const matched = (item.matched_keywords || []).join(', ') || '无';
     return `<li>${esc(item.title)} <small>热度 ${esc(item.hotness_score)}，命中：${esc(matched)}</small></li>`;
   }).join('');
-  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已处理跳过 ${esc(d.skipped_seen_count ?? 0)} 条；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+  const age = d.max_age_days ? `；超过 ${esc(d.max_age_days)} 天过滤 ${esc(d.skipped_old_count ?? 0)} 条` : '';
+  const excluded = d.exclude_keywords?.length ? `；排除词过滤 ${esc(d.skipped_excluded_count ?? 0)} 条` : '';
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已处理跳过 ${esc(d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
 }
 
 async function loadConfig(){
