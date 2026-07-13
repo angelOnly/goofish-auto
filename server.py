@@ -204,8 +204,11 @@ function renderDiagnostics(data){
   const age = d.max_age_days ? `；超过 ${esc(d.max_age_days)} 天过滤 ${esc(d.skipped_old_count ?? 0)} 条` : '';
   const excluded = d.exclude_keywords?.length ? `；排除词过滤 ${esc(d.skipped_excluded_count ?? 0)} 条` : '';
   const market = d.market_enabled ? `；闲鱼市场样本 ${esc(d.market_signal_count ?? 0)} 条` : '';
+  const reused = d.reused_unpublished_count ? `；复用未发布缓存 ${esc(d.reused_unpublished_count)} 条` : '';
+  const memberDelivery = d.member_delivery_found_count ? `；会员网盘链接 ${esc(d.member_delivery_found_count)} 条` : '';
+  const cookieValid = d.member_cookie_validated ? '；会员 Cookie 已校验' : '';
   const marketError = d.market_error ? `<p class="warn">闲鱼市场信号读取失败：${esc(d.market_error)}</p>` : '';
-  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
 }
 function detailRowFor(folder){
   return [...document.querySelectorAll('.inline-detail-row')].find(row => row.dataset.detailFor === folder);

@@ -81,6 +81,9 @@
       "per_page": 20,
       "max_pages": 3,
       "request_interval_seconds": 10,
+      "fetch_member_delivery": true,
+      "member_cookie_env": "THEITZY_COOKIE",
+      "member_request_interval_seconds": 10,
       "orderby": "date",
       "order": "desc"
     },
@@ -95,6 +98,7 @@
       "include_hidden": false
     },
     "output_limit": 20,
+    "reuse_unpublished_selections": true,
     "rights_confirmed": false,
     "authorized_assets": false,
     "owned_delivery_links": []

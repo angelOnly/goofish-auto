@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,8 +17,10 @@ score_item = pipeline.score_item
 strip_html = pipeline.strip_html
 parse_goofish_result_record = pipeline.parse_goofish_result_record
 apply_market_signals = pipeline.apply_market_signals
+extract_baidu_delivery_from_html = pipeline.extract_baidu_delivery_from_html
 selection_db_path = pipeline.selection_db_path
 set_course_published = pipeline.set_course_published
+validate_member_cookie = pipeline.validate_member_cookie
 
 
 class PipelineTests(unittest.TestCase):
@@ -51,6 +54,15 @@ class PipelineTests(unittest.TestCase):
         item = score_item({"title": "项目资料", "categories": [], "summary": "包含 Cursor 和 MCP 工作流", "published_at": "2026-07-13T00:00:00+00:00", "cover_url": ""}, ["Cursor", "MCP"])
         self.assertEqual(item["matched_keywords"], ["cursor", "mcp"])
 
+    def test_extracts_baidu_delivery_from_member_html(self):
+        delivery = extract_baidu_delivery_from_html(
+            '<a href="https://pan.baidu.com/s/1Ab_cdE">立即下载</a><span>文件密码：exn7</span>',
+            "https://theitzy.net/course/",
+        )
+        self.assertEqual(delivery["status"], "found")
+        self.assertEqual(delivery["links"], ["https://pan.baidu.com/s/1Ab_cdE"])
+        self.assertEqual(delivery["passwords"], ["exn7"])
+
     def test_run_is_review_first(self):
         task = {
             "name": "测试",
@@ -70,6 +82,52 @@ class PipelineTests(unittest.TestCase):
             self.assertNotIn("禁止发布", (item_dir / "copy.md").read_text(encoding="utf-8"))
             self.assertIn("禁止发布", (item_dir / "delivery.md").read_text(encoding="utf-8"))
             self.assertEqual(json.loads((item_dir / "item.json").read_text(encoding="utf-8"))["rights_review"], "required")
+
+    def test_member_delivery_is_written_when_authorized_and_cookie_is_available(self):
+        task = {
+            "name": "会员链接测试",
+            "source": "theitzy",
+            "keywords": ["AI"],
+            "rights_confirmed": True,
+            "authorized_assets": False,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+            },
+        }
+        raw = [{
+            "id": "theitzy:member",
+            "title": "AI 会员课程",
+            "page_url": "https://theitzy.net/member/",
+            "published_at": "2999-01-01T00:00:00+00:00",
+            "categories": ["AI"],
+            "summary": "摘要",
+            "cover_url": "",
+        }]
+        html = 'jiangzb 退出 <a href="https://pan.baidu.com/s/1Member">下载</a><div>提取码：m123</div>'
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken", "AI_API_KEY": "", "AI_BASE_URL": "", "AI_MODEL": ""}):
+                with patch.object(pipeline, "fetch_source", return_value=raw), patch.object(pipeline, "http_text", return_value=html):
+                    summary = run_task(task, output_dir=Path(tmp))
+            self.assertEqual(summary["diagnostics"]["member_delivery_found_count"], 1)
+            self.assertTrue(summary["diagnostics"]["member_cookie_validated"])
+            item_dir = next(Path(tmp).glob("*/01-*"))
+            delivery_text = (item_dir / "delivery.md").read_text(encoding="utf-8")
+            self.assertIn("https://pan.baidu.com/s/1Member", delivery_text)
+            self.assertIn("m123", delivery_text)
+
+    def test_member_cookie_validation_blocks_invalid_login(self):
+        task = {
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+            },
+        }
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
+            with patch.object(pipeline, "http_text", return_value='<form id="loginform"><input name="log"></form>'):
+                with self.assertRaises(RuntimeError):
+                    validate_member_cookie(task)
 
     def test_only_published_selection_is_filtered_next_time(self):
         raw = [{
@@ -96,6 +154,27 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(skipped["diagnostics"]["skipped_published_count"], 1)
             self.assertEqual(included["count"], 1)
             self.assertEqual(unblocked["count"], 1)
+
+    def test_unpublished_selection_reuses_cached_item(self):
+        task = {"name": "缓存测试", "source": "theitzy", "keywords": ["AI"], "source_config": {"base_url": "https://theitzy.net"}}
+        first_raw = [{
+            "id": "theitzy:cache",
+            "title": "AI 课程旧标题",
+            "page_url": "https://theitzy.net/cache/",
+            "published_at": "2999-01-01T00:00:00+00:00",
+            "categories": ["AI"],
+            "summary": "旧摘要",
+            "cover_url": "",
+        }]
+        second_raw = [{**first_raw[0], "title": "AI 课程新标题", "summary": "新摘要"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            with patch.object(pipeline, "fetch_source", return_value=first_raw):
+                run_task(task, output_dir=output_dir)
+            with patch.object(pipeline, "fetch_source", return_value=second_raw):
+                summary = run_task(task, output_dir=output_dir)
+        self.assertEqual(summary["diagnostics"]["reused_unpublished_count"], 1)
+        self.assertEqual(summary["items"][0]["title"], "AI 课程旧标题")
 
     def test_run_filters_old_and_excluded_items(self):
         raw = [

@@ -1,6 +1,7 @@
 """Local, review-first resource trend pipeline.
 
-This module intentionally collects public metadata only. It does not download
+This module defaults to public metadata only. Optional member-page delivery
+link extraction uses a user-provided session cookie and still does not download
 course/video/archive payloads or bypass login, rate limits, robots.txt, or
 anti-bot controls. Asset downloads are limited to same-origin images and are
 disabled unless the task explicitly confirms distribution rights.
@@ -23,7 +24,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urljoin, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -109,7 +110,12 @@ def load_env_file(path: Path = ENV_FILE) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"\''))
+        key = key.strip()
+        value = value.strip().strip('"\'')
+        if key == "THEITZY_COOKIE":
+            os.environ[key] = value
+        else:
+            os.environ.setdefault(key, value)
 
 
 def http_text(url: str, *, timeout: int = 30, headers: Optional[Dict[str, str]] = None) -> str:
@@ -122,6 +128,50 @@ def http_text(url: str, *, timeout: int = 30, headers: Optional[Dict[str, str]] 
 
 def http_json(url: str, *, timeout: int = 30) -> Any:
     return json.loads(http_text(url, timeout=timeout, headers={"Accept": "application/json"}))
+
+
+def _wordpress_cookie_username(cookie: str) -> str:
+    match = re.search(r"wordpress_logged_in_[^=]*=([^;]+)", cookie or "")
+    if not match:
+        return ""
+    value = unquote(match.group(1))
+    return value.split("|", 1)[0].strip()
+
+
+def validate_member_cookie(task: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    source_config = task.get("source_config") or {}
+    if not source_config.get("fetch_member_delivery"):
+        return None
+    cookie_env = str(source_config.get("member_cookie_env") or "THEITZY_COOKIE")
+    cookie = os.getenv(cookie_env, "").strip()
+    if not cookie:
+        raise RuntimeError(f"会员链接抓取已开启，但未设置 {cookie_env}。请在本机 .env 或环境变量里填写 TheItzy 登录 Cookie。")
+    if "wordpress_logged_in_" not in cookie:
+        raise RuntimeError(f"{cookie_env} 中没有 wordpress_logged_in 登录 Cookie，无法确认 TheItzy 会员登录态。")
+
+    base_url = str(source_config.get("base_url") or "https://theitzy.net").rstrip("/")
+    check_url = str(source_config.get("member_cookie_check_url") or f"{base_url}/user/?action=vip")
+    timeout = int(source_config.get("member_timeout", 30))
+    content = http_text(
+        check_url,
+        timeout=timeout,
+        headers={
+            "Accept": "text/html",
+            "Cookie": cookie,
+            "Referer": base_url,
+        },
+    )
+    username = _wordpress_cookie_username(cookie)
+    haystack = f"{content}\n{strip_html(content, 20000)}".lower()
+    configured_markers = [str(value).strip() for value in source_config.get("member_cookie_valid_markers", []) if str(value).strip()]
+    valid_markers = configured_markers or [value for value in [username, "logout", "退出"] if value]
+    if any(marker.lower() in haystack for marker in valid_markers):
+        return {"cookie_env": cookie_env, "check_url": check_url, "username": username}
+
+    invalid_markers = ["wp-login.php", "name=\"log\"", "用户登录", "登录后", "请登录", "loginform"]
+    if any(marker.lower() in haystack for marker in invalid_markers):
+        raise RuntimeError(f"{cookie_env} 已失效或未登录 TheItzy；请重新从浏览器复制 Cookie 后再运行本地资源整理。")
+    raise RuntimeError(f"无法确认 {cookie_env} 是否有效：会员校验页没有出现登录用户名或退出标识。")
 
 
 def get_first(mapping: Dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
@@ -176,6 +226,42 @@ def extract_image_url(content_html: str, page_url: str) -> Optional[str]:
             if candidate and not candidate.startswith("data:"):
                 return urljoin(page_url, candidate)
     return None
+
+
+def _normalise_extracted_url(value: str) -> str:
+    candidate = html.unescape(value or "").replace("\\/", "/").strip().strip("\"'()[]{}<>，。；;、")
+    return candidate
+
+
+def extract_baidu_delivery_from_html(content_html: str, page_url: str = "") -> Dict[str, Any]:
+    """Extract visible Baidu Netdisk delivery metadata from an authorized page."""
+    text = html.unescape(content_html or "").replace("\\/", "/")
+    link_pattern = re.compile(
+        r"https?://(?:pan|yun)\.baidu\.com/(?:s/[A-Za-z0-9_-]+|share/(?:init|link)\?[^\"'<>\\\s]+)",
+        flags=re.I,
+    )
+    links: List[str] = []
+    for match in link_pattern.finditer(text):
+        candidate = _normalise_extracted_url(match.group(0))
+        if candidate and candidate not in links:
+            links.append(candidate)
+
+    password_pattern = re.compile(
+        r"(?:提取码|访问码|文件密码|网盘密码|百度网盘密码|密码)\s*[:：]?\s*([A-Za-z0-9]{4,12})",
+        flags=re.I,
+    )
+    passwords: List[str] = []
+    for match in password_pattern.finditer(strip_html(text, 20000)):
+        password = match.group(1).strip()
+        if password and password not in passwords:
+            passwords.append(password)
+
+    return {
+        "status": "found" if links else "not_found",
+        "links": links,
+        "passwords": passwords,
+        "source_url": page_url,
+    }
 
 
 def normalise_title(value: str) -> str:
@@ -540,6 +626,97 @@ def download_authorized_cover(item: Dict[str, Any], task: Dict[str, Any], asset_
     return str(path.relative_to(asset_dir.parent.parent)).replace("\\", "/")
 
 
+def fetch_member_delivery(
+    item: Dict[str, Any],
+    task: Dict[str, Any],
+    last_request: List[float],
+) -> Optional[Dict[str, Any]]:
+    source_config = task.get("source_config") or {}
+    if not source_config.get("fetch_member_delivery"):
+        return None
+    if not task.get("rights_confirmed"):
+        return {
+            "status": "skipped_rights_unconfirmed",
+            "links": [],
+            "passwords": [],
+            "source_url": item.get("page_url", ""),
+            "message": "未确认分发权，已跳过会员网盘链接抓取。",
+        }
+    page_url = str(item.get("page_url") or "")
+    if not page_url:
+        return {"status": "missing_page_url", "links": [], "passwords": [], "source_url": ""}
+    cookie_env = str(source_config.get("member_cookie_env") or "THEITZY_COOKIE")
+    cookie = os.getenv(cookie_env, "").strip()
+    if not cookie:
+        return {
+            "status": "missing_cookie",
+            "links": [],
+            "passwords": [],
+            "source_url": page_url,
+            "message": f"未设置 {cookie_env}，无法请求会员页。",
+        }
+    interval = float(source_config.get("member_request_interval_seconds", source_config.get("request_interval_seconds", 10)))
+    timeout = int(source_config.get("member_timeout", 30))
+    try:
+        sleep_between_requests(last_request, interval)
+        content = http_text(
+            page_url,
+            timeout=timeout,
+            headers={
+                "Accept": "text/html",
+                "Cookie": cookie,
+                "Referer": str(source_config.get("base_url") or "https://theitzy.net"),
+            },
+        )
+        last_request[:] = [time.monotonic()]
+        delivery = extract_baidu_delivery_from_html(content, page_url)
+        LOGGER.info(
+            "member_delivery fetched course_id=%s status=%s links=%s",
+            item.get("id"),
+            delivery.get("status"),
+            len(delivery.get("links") or []),
+        )
+        return delivery
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        LOGGER.exception("member_delivery fetch failed course_id=%s", item.get("id"))
+        return {
+            "status": "error",
+            "links": [],
+            "passwords": [],
+            "source_url": page_url,
+            "message": str(exc),
+        }
+
+
+def format_delivery_links(item: Dict[str, Any], task: Dict[str, Any]) -> str:
+    member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else None
+    if task.get("rights_confirmed") and member_delivery and member_delivery.get("links"):
+        lines = [f"- {link}" for link in member_delivery.get("links", [])]
+        passwords = [str(value) for value in member_delivery.get("passwords", []) if str(value)]
+        if passwords:
+            lines.append(f"- 提取码/文件密码：{', '.join(passwords)}")
+        lines.append("- 来源：TheItzy 会员页（请确认你拥有二次分发权后再发货）")
+        return "\n".join(lines)
+
+    owned_links = [str(link) for link in item.get("delivery_links", []) if str(link).strip()]
+    if owned_links:
+        return "\n".join(f"- {link}" for link in owned_links)
+
+    if member_delivery and member_delivery.get("status") in {"missing_cookie", "not_found", "error", "missing_page_url"}:
+        status_text = {
+            "missing_cookie": member_delivery.get("message") or "未设置会员 Cookie，无法请求会员页。",
+            "not_found": "会员页中没有识别到百度网盘链接。",
+            "error": f"会员页请求失败：{member_delivery.get('message') or '未知错误'}",
+            "missing_page_url": "缺少课程页地址，无法请求会员页。",
+        }.get(str(member_delivery.get("status")), "")
+        return f"- 待填入你自己的授权网盘链接\n- 会员链接抓取状态：{status_text}"
+
+    if member_delivery and member_delivery.get("status") == "skipped_rights_unconfirmed":
+        return "- 待填入你自己的授权网盘链接\n- 未确认分发权，已跳过会员网盘链接抓取。"
+
+    return "- 待填入你自己的授权网盘链接"
+
+
 def _copy_tags(item: Dict[str, Any]) -> str:
     values = item.get("matched_keywords") or item.get("categories") or ["数字资料"]
     tags = []
@@ -727,6 +904,74 @@ def get_published_course_ids(db_path: Path) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def get_cached_unpublished_items(course_ids: Iterable[str], db_path: Path) -> Dict[str, Dict[str, Any]]:
+    ids = [str(value) for value in course_ids if str(value)]
+    if not ids:
+        return {}
+    init_selection_db(db_path)
+    placeholders = ",".join("?" for _ in ids)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT course_id, raw_json
+            FROM course_selections
+            WHERE published = 0 AND raw_json IS NOT NULL AND raw_json != '' AND course_id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+    cached: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        try:
+            value = json.loads(str(row["raw_json"]))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            cached[str(row["course_id"])] = value
+    return cached
+
+
+def _merge_cached_item(cached: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    dynamic_keys = {
+        "hotness_score",
+        "base_hotness_score",
+        "market_match_score",
+        "market_matched_terms",
+        "market_reference_count",
+        "market_reference_titles",
+        "market_avg_price",
+        "market_median_price",
+        "market_price_min",
+        "market_price_max",
+        "selection_status",
+        "age_days",
+    }
+    merged = {**cached}
+    for key in dynamic_keys:
+        if key in current:
+            merged[key] = current[key]
+    merged["cache_reused"] = True
+    return merged
+
+
+def should_reuse_cached_item(cached: Dict[str, Any], task: Dict[str, Any]) -> bool:
+    if not cached.get("copy") or not cached.get("delivery"):
+        return False
+    expected_rights = "confirmed" if task.get("rights_confirmed") else "required"
+    if cached.get("rights_review") != expected_rights:
+        return False
+    configured_links = [str(link) for link in task.get("owned_delivery_links", []) if str(link).strip()]
+    cached_links = [str(link) for link in cached.get("delivery_links", []) if str(link).strip()]
+    if configured_links != cached_links:
+        return False
+    source_config = task.get("source_config") or {}
+    needs_member_delivery = bool(source_config.get("fetch_member_delivery") and task.get("rights_confirmed"))
+    if needs_member_delivery:
+        member_delivery = cached.get("member_delivery") if isinstance(cached.get("member_delivery"), dict) else {}
+        return bool(member_delivery.get("links"))
+    return True
+
+
 def save_selected_courses(
     items: List[Dict[str, Any]],
     *,
@@ -850,6 +1095,14 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         max_age_days=max_age_days,
         output_limit=output_limit,
     )
+    member_cookie_validation = validate_member_cookie(task)
+    if member_cookie_validation:
+        note(
+            "member_cookie_validated",
+            cookie_env=member_cookie_validation.get("cookie_env"),
+            check_url=member_cookie_validation.get("check_url"),
+            username=member_cookie_validation.get("username"),
+        )
     market_data = fetch_goofish_market_signals(task)
     market_signals = list(market_data.get("signals", []))
     note(
@@ -921,6 +1174,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         "market_signal_count": len(market_signals),
         "market_files": market_data.get("files", []),
         "market_error": market_data.get("error", ""),
+        "member_cookie_validated": bool(member_cookie_validation),
         "top_candidates": [
             {
                 "title": item.get("title"),
@@ -946,16 +1200,43 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         market_signal_count=len(market_signals),
     )
 
-    selection_statuses = save_selected_courses(items, run_id=run_id, task_name=task_name, db_path=db_path)
+    item_ids = [str(item.get("id") or "") for item in items]
+    selection_statuses = get_selection_statuses(item_ids, db_path)
+    reuse_unpublished = bool(task.get("reuse_unpublished_selections", True))
+    cached_items = get_cached_unpublished_items(item_ids, db_path) if reuse_unpublished else {}
+    member_delivery_last_request: List[float] = []
+    enriched_items: List[Dict[str, Any]] = []
 
     for item in items:
-        item["selection_status"] = selection_statuses.get(str(item.get("id") or ""), {"published": False})
-        item["cover_local_path"] = download_authorized_cover(item, task, asset_dir)
-        item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
-        ai_copy = maybe_ai_copy(item, task)
-        item["copy"] = ai_copy or template_copy(item, task)
-        item["copy_source"] = "ai" if ai_copy else "template"
-        item["delivery_links"] = list(task.get("owned_delivery_links", []))
+        course_id = str(item.get("id") or "")
+        cached = cached_items.get(course_id)
+        if cached and should_reuse_cached_item(cached, task):
+            item = _merge_cached_item(cached, item)
+        else:
+            item["cache_reused"] = False
+            item["cover_local_path"] = download_authorized_cover(item, task, asset_dir)
+            item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
+            item["delivery_links"] = list(task.get("owned_delivery_links", []))
+            member_delivery = fetch_member_delivery(item, task, member_delivery_last_request)
+            if member_delivery is not None:
+                item["member_delivery"] = member_delivery
+            ai_copy = maybe_ai_copy(item, task)
+            item["copy"] = ai_copy or template_copy(item, task)
+            item["copy_source"] = "ai" if ai_copy else "template"
+        item["selection_status"] = selection_statuses.get(course_id, item.get("selection_status") or {"published": False})
+        enriched_items.append(item)
+    items = enriched_items
+    diagnostics["reused_unpublished_count"] = sum(1 for item in items if item.get("cache_reused"))
+    diagnostics["member_delivery_found_count"] = sum(
+        1
+        for item in items
+        if isinstance(item.get("member_delivery"), dict) and item["member_delivery"].get("links")
+    )
+    note(
+        "items_enriched",
+        reused_unpublished_count=diagnostics["reused_unpublished_count"],
+        member_delivery_found_count=diagnostics["member_delivery_found_count"],
+    )
 
     for index, item in enumerate(items, start=1):
         slug = f"{index:02d}-{safe_slug(item['title'])}"
@@ -963,13 +1244,13 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         item_dir.mkdir(exist_ok=True)
         (item_dir / "copy.md").write_text(item["copy"], encoding="utf-8")
         delivery_status = "可进入授权审核后的发布流程" if task.get("rights_confirmed") else "未确认分发权，禁止发布"
-        delivery_links = "\n".join(f"- {link}" for link in item["delivery_links"]) or "- 待填入你自己的授权网盘链接"
+        delivery_links = format_delivery_links(item, task)
         cover_info = (
             f"- 本地：{item['cover_local_path']}"
             if item.get("cover_local_path")
             else f"- 公开封面地址（仅供人工核验）：{item.get('cover_url') or '无'}"
         )
-        delivery = (
+        delivery = item.get("delivery") or (
             "# 发货信息（待审核）\n\n"
             f"商品：{item['title']}\n"
             f"状态：{delivery_status}\n"
@@ -981,11 +1262,16 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             "原始页面（仅作来源核验）：\n"
             f"- {item.get('page_url') or ''}\n"
         )
+        item["delivery"] = delivery
         (item_dir / "delivery.md").write_text(delivery, encoding="utf-8")
         (item_dir / "item.json").write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
         seen_record = {"run_id": run_id, "title": item.get("title")}
         if item.get("id"):
             legacy_seen[str(item["id"])] = seen_record
+
+    selection_statuses = save_selected_courses(items, run_id=run_id, task_name=task_name, db_path=db_path)
+    for item in items:
+        item["selection_status"] = selection_statuses.get(str(item.get("id") or ""), item.get("selection_status") or {"published": False})
 
     note("run_complete", count=len(items), run_dir=str(run_dir))
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
