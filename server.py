@@ -64,8 +64,9 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;max-height:360px;overflow:auto}
 a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;background:#eef2ff;color:#3730a3;font-size:12px}.pill.ok{background:#ecfdf5;color:#166534}.pill.warn{background:#fff7ed;color:#9a3412}
 .help{background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;padding:12px;color:#475569;line-height:1.7}
-.copy-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.cover-preview{max-width:360px;width:100%;border:1px solid var(--line);border-radius:8px;margin-top:8px;background:white}
+.copy-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.cover-preview{max-width:220px;width:100%;border:1px solid var(--line);border-radius:8px;margin-top:8px;background:white}
 .image-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:12px 0}.tiny{font-size:12px;color:var(--muted)}
+.image-preview-row{display:flex;align-items:flex-start;gap:12px;margin:10px 0;flex-wrap:wrap}.thumb-link{display:inline-block;border:1px solid var(--line);border-radius:8px;background:white;padding:4px}.thumb-link img{display:block;width:120px;max-height:120px;object-fit:cover;border-radius:5px}
 .inline-detail-row td{background:#fbfdff;padding:0 8px 12px}.inline-copy-panel{border:1px solid #dbe5f0;border-radius:8px;padding:10px 12px;margin:4px 0 8px;background:white}
 .inline-copy-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.inline-copy-head h3{margin:0;font-size:14px}.inline-copy-actions{display:flex;gap:6px;flex-wrap:wrap}
 .copy-preview{white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.65;color:#24324a;background:#f8fafc;border:1px solid #edf2f7;border-radius:7px;padding:8px;margin:0}
@@ -294,7 +295,14 @@ async function showItem(folder){
   const copyText = data.copy_suggested || data.copy;
   expandedFolder = folder;
   if(detailRow){
-    const imageButton = data.cover_url ? `<button class="secondary mini js-copy-inline" data-field="cover_url">复制图片链接</button>` : '';
+    const imagePreview = data.cover_url
+      ? `<div class="image-preview-row">
+          <a class="thumb-link" href="${esc(data.cover_url)}" target="_blank" rel="noreferrer" title="点开原图，或长按图片保存原图">
+            <img src="${esc(data.cover_url)}" alt="封面预览" loading="lazy">
+          </a>
+          <p class="tiny">小预览图。点图可新标签打开原图；手机上长按图片可保存原图。</p>
+        </div>`
+      : `<p class="tiny">这个条目没有公开图片。</p>`;
     const marketTerms = (data.item?.market_matched_terms || []).slice(0, 8).join(', ');
     const marketRefs = (data.item?.market_reference_titles || []).slice(0, 3).map(ref => `<li>${esc(ref.title)}${ref.price ? ` <small>¥${esc(ref.price)}</small>` : ''}</li>`).join('');
     const marketHtml = marketTerms
@@ -307,11 +315,11 @@ async function showItem(folder){
           <div class="inline-copy-actions">
             <button class="secondary mini js-copy-inline" data-field="copy_suggested">复制文案</button>
             <button class="secondary mini js-copy-inline" data-field="delivery">复制发货</button>
-            ${imageButton}
             <button class="secondary mini js-show-full" data-folder="${esc(folder)}">看完整</button>
           </div>
         </div>
         ${marketHtml}
+        ${imagePreview}
         <p class="copy-preview">${esc(copyText)}</p>
       </div>`;
   }
@@ -321,10 +329,10 @@ async function showFullItem(folder){
   currentItem = data;
   const copyText = data.copy_suggested || data.copy;
   const imageHtml = data.cover_url
-    ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">公开封面仅供人工核验。正式上架建议使用你自己有权使用的封面图、目录长图或重新制作说明图。</p><p><a target="_blank" rel="noreferrer" href="${esc(data.cover_url)}">${esc(data.cover_url)}</a></p><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览"></div>`
+    ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">小图只是预览，图片源是原图。点图可新标签打开原图；手机上长按图片可保存原图。</p><a class="thumb-link" target="_blank" rel="noreferrer" href="${esc(data.cover_url)}"><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览" loading="lazy"></a></div>`
     : `<div class="image-box"><h3>图片信息</h3><p class="muted">这个条目没有公开封面地址。正式上架时建议补一张自有/授权封面图或目录图。</p></div>`;
   $('itemDetail').innerHTML = imageHtml +
-    `<h3>完整闲鱼文案</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_suggested">复制文案</button><button class="secondary mini js-copy-field" data-field="cover_url">复制图片链接</button></div><pre>${esc(copyText)}</pre>` +
+    `<h3>完整闲鱼文案</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_suggested">复制文案</button></div><pre>${esc(copyText)}</pre>` +
     `<h3>发货信息 delivery.md</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery">复制发货信息</button></div><pre>${esc(data.delivery)}</pre>`;
   $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
 }

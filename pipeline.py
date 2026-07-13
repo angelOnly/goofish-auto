@@ -18,7 +18,7 @@ import re
 import sqlite3
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -33,6 +33,7 @@ TASKS_FILE = ROOT / "tasks.json"
 ENV_FILE = ROOT / ".env"
 USER_AGENT = "XinliResourcePipeline/0.1 (local review; respects robots.txt)"
 LOGGER = logging.getLogger("goofish_auto.pipeline")
+LOCAL_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 GENERIC_MARKET_TERMS = {
     "ai",
     "人工智能",
@@ -46,6 +47,14 @@ GENERIC_MARKET_TERMS = {
     "实战",
     "项目实战",
 }
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def local_now() -> datetime:
+    return datetime.now(LOCAL_TIMEZONE)
 
 
 class TextExtractor(HTMLParser):
@@ -292,7 +301,7 @@ def score_item(item: Dict[str, Any], keywords: Iterable[str]) -> Dict[str, Any]:
     for term in terms:
         if term in text and term not in matched:
             matched.append(term)
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     published_at = str(item.get("published_at") or "")
     age_days = 365.0
     if published_at:
@@ -556,9 +565,6 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
     bullets = _summary_bullets(summary)
     topic = categories[0] if categories else "数字资料"
     tags = _copy_tags(item)
-    audit_prefix = ""
-    if not task.get("rights_confirmed"):
-        audit_prefix = "【内部审核草稿｜暂勿发布】\n当前未完成内容权利确认，禁止发布、售卖或交付。审核通过后再改成正式上架文案。\n\n"
     market_terms = item.get("market_matched_terms") or []
     market_reference = ""
     if market_terms:
@@ -572,8 +578,7 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
         )
 
     return (
-        audit_prefix
-        + f"{title}\n"
+        f"{title}\n"
         + f"{tags}\n\n"
         + "【核心价值】\n"
         + f"围绕 {topic} 的系统学习/资料整理方向，适合想快速判断内容价值、补齐知识框架的人。购买前建议先确认目录、格式和交付清单。\n\n"
@@ -730,7 +735,7 @@ def save_selected_courses(
     db_path: Path,
 ) -> Dict[str, Dict[str, Any]]:
     init_selection_db(db_path)
-    now = datetime.now(timezone.utc).isoformat()
+    now = local_now().isoformat()
     with closing(sqlite3.connect(db_path)) as conn:
         with conn:
             for item in items:
@@ -776,7 +781,7 @@ def save_selected_courses(
 
 def set_course_published(course_id: str, published: bool, db_path: Path) -> Dict[str, Any]:
     init_selection_db(db_path)
-    now = datetime.now(timezone.utc).isoformat()
+    now = local_now().isoformat()
     published_at = now if published else None
     with closing(sqlite3.connect(db_path)) as conn:
         with conn:
@@ -815,7 +820,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     legacy_seen = state.setdefault("seen", {})
     db_path = selection_db_path(output_dir)
     published_course_ids = get_published_course_ids(db_path)
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_id = local_now().strftime("%Y%m%d-%H%M%S")
     run_dir = output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     asset_dir = run_dir / "assets"
@@ -829,7 +834,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
 
     def note(message: str, **fields: Any) -> None:
         event = {
-            "time": datetime.now(timezone.utc).isoformat(),
+            "time": local_now().isoformat(),
             "message": message,
             **fields,
         }

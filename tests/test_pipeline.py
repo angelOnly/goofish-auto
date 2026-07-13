@@ -67,7 +67,8 @@ class PipelineTests(unittest.TestCase):
                 summary = run_task(task, output_dir=Path(tmp))
             self.assertEqual(summary["count"], 1)
             item_dir = next(Path(tmp).glob("*/01-*"))
-            self.assertIn("禁止发布", (item_dir / "copy.md").read_text(encoding="utf-8"))
+            self.assertNotIn("禁止发布", (item_dir / "copy.md").read_text(encoding="utf-8"))
+            self.assertIn("禁止发布", (item_dir / "delivery.md").read_text(encoding="utf-8"))
             self.assertEqual(json.loads((item_dir / "item.json").read_text(encoding="utf-8"))["rights_review"], "required")
 
     def test_only_published_selection_is_filtered_next_time(self):
