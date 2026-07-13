@@ -525,6 +525,43 @@ def _normalise_term(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _parse_market_timestamp(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=LOCAL_TIMEZONE)
+        return parsed
+    except ValueError:
+        pass
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text, pattern).replace(tzinfo=LOCAL_TIMEZONE)
+        except ValueError:
+            continue
+    return None
+
+
+def _as_int_config(config: Dict[str, Any], key: str, default: int, *, minimum: int = 0, maximum: int = 10_000) -> int:
+    try:
+        value = int(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _as_float_config(
+    config: Dict[str, Any], key: str, default: float, *, minimum: float = 0.0, maximum: float = 10_000.0
+) -> float:
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def _market_terms_from_record(record: Dict[str, Any], task_keywords: Iterable[str]) -> List[str]:
     title = _normalise_term(record.get("title"))
     ai = record.get("ai_analysis") or {}
@@ -545,10 +582,176 @@ def _market_terms_from_record(record: Dict[str, Any], task_keywords: Iterable[st
     return terms[:12]
 
 
+def _title_cluster_key(signal: Dict[str, Any]) -> str:
+    terms = [term for term in signal.get("terms", []) if term not in GENERIC_MARKET_TERMS]
+    if terms:
+        return "|".join(sorted(terms[:4]))
+    title = _normalise_term(signal.get("title"))
+    tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]{2,}", title)
+    filtered = [
+        token
+        for token in tokens
+        if token not in GENERIC_MARKET_TERMS and not token.isdigit() and len(token) >= 2
+    ]
+    return "|".join(filtered[:6]) or title[:32]
+
+
+def _identity_key(signal: Dict[str, Any]) -> str:
+    item_id = str(signal.get("item_id") or "").strip()
+    if item_id:
+        return f"item:{item_id}"
+    link = str(signal.get("link") or "").split("&", 1)[0].strip()
+    if link:
+        return f"link:{link}"
+    return f"title:{_normalise_term(signal.get('title'))[:80]}"
+
+
+def _base_market_heat_score(views: float, wants: float, keyword_hit_count: int, is_recommended: bool) -> float:
+    views_score = min(35.0, math.log1p(max(0.0, views)) / math.log1p(1_000.0) * 35.0)
+    wants_score = min(25.0, math.log1p(max(0.0, wants)) / math.log1p(200.0) * 25.0)
+    match_score = min(10.0, max(0, keyword_hit_count) * 2.0)
+    recommend_score = 5.0 if is_recommended else 0.0
+    return views_score + wants_score + match_score + recommend_score
+
+
+def _annotate_market_heat(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_identity: Dict[str, List[Dict[str, Any]]] = {}
+    by_cluster: Dict[str, List[Dict[str, Any]]] = {}
+    by_seller: Dict[str, List[Dict[str, Any]]] = {}
+    for signal in signals:
+        identity = _identity_key(signal)
+        cluster_key = _title_cluster_key(signal)
+        seller = _normalise_term(signal.get("seller_nickname"))
+        signal["identity_key"] = identity
+        signal["title_cluster_key"] = cluster_key
+        by_identity.setdefault(identity, []).append(signal)
+        by_cluster.setdefault(cluster_key, []).append(signal)
+        if seller:
+            by_seller.setdefault(seller, []).append(signal)
+
+    deltas: Dict[str, Dict[str, float]] = {}
+    for identity, group in by_identity.items():
+        ordered = sorted(
+            group,
+            key=lambda item: _parse_market_timestamp(item.get("crawl_time")) or datetime.min.replace(tzinfo=LOCAL_TIMEZONE),
+        )
+        first, last = ordered[0], ordered[-1]
+        deltas[identity] = {
+            "views_delta": max(0.0, float(last.get("views", 0.0)) - float(first.get("views", 0.0))),
+            "wants_delta": max(0.0, float(last.get("wants", 0.0)) - float(first.get("wants", 0.0))),
+        }
+
+    for signal in signals:
+        cluster = by_cluster.get(signal["title_cluster_key"], [])
+        sellers = {_normalise_term(item.get("seller_nickname")) for item in cluster if item.get("seller_nickname")}
+        seller = _normalise_term(signal.get("seller_nickname"))
+        seller_repeat_count = len(by_seller.get(seller, [])) if seller else 0
+        delta = deltas.get(signal["identity_key"], {"views_delta": 0.0, "wants_delta": 0.0})
+        delta_score = min(
+            20.0,
+            math.log1p(delta["views_delta"] + delta["wants_delta"] * 8.0) / math.log1p(1_000.0) * 20.0,
+        )
+        density_score = min(12.0, math.log1p(len(cluster)) / math.log1p(20.0) * 12.0)
+        seller_score = min(8.0, math.log1p(len(sellers)) / math.log1p(10.0) * 8.0)
+        repeat_penalty = min(6.0, max(0, seller_repeat_count - 3) * 1.5)
+        heat_score = _base_market_heat_score(
+            float(signal.get("views", 0.0)),
+            float(signal.get("wants", 0.0)),
+            int(signal.get("keyword_hit_count", 0) or 0),
+            bool(signal.get("is_recommended")),
+        )
+        heat_score = max(0.0, min(100.0, heat_score + delta_score + density_score + seller_score - repeat_penalty))
+        signal.update(
+            {
+                "heat_score": round(heat_score, 1),
+                "views_delta": round(delta["views_delta"], 1),
+                "wants_delta": round(delta["wants_delta"], 1),
+                "title_density": len(cluster),
+                "title_cluster_seller_count": len(sellers),
+                "seller_repeat_count": seller_repeat_count,
+            }
+        )
+    return signals
+
+
+def _filter_market_signals(signals: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    include_tasks = [_normalise_term(value) for value in config.get("task_name_keywords", []) if str(value).strip()]
+    exclude_tasks = [_normalise_term(value) for value in config.get("exclude_task_name_keywords", []) if str(value).strip()]
+    min_views = _as_float_config(config, "min_views", 0.0)
+    min_wants = _as_float_config(config, "min_wants", 0.0)
+    min_heat_score = _as_float_config(config, "min_heat_score", 0.0)
+    min_title_density = _as_int_config(config, "min_title_density", 0)
+    min_sellers = _as_int_config(config, "min_title_cluster_sellers", 0)
+    recommended_only = bool(config.get("recommended_only", False))
+    require_terms = bool(config.get("require_terms", False))
+
+    filtered: List[Dict[str, Any]] = []
+    for signal in signals:
+        task_name = _normalise_term(signal.get("task_name"))
+        if include_tasks and not any(value in task_name for value in include_tasks):
+            continue
+        if exclude_tasks and any(value in task_name for value in exclude_tasks):
+            continue
+        if require_terms and not signal.get("terms"):
+            continue
+        if recommended_only and not signal.get("is_recommended"):
+            continue
+        if float(signal.get("views", 0.0)) < min_views:
+            continue
+        if float(signal.get("wants", 0.0)) < min_wants:
+            continue
+        if float(signal.get("heat_score", 0.0)) < min_heat_score:
+            continue
+        if int(signal.get("title_density", 0) or 0) < min_title_density:
+            continue
+        if int(signal.get("title_cluster_seller_count", 0) or 0) < min_sellers:
+            continue
+        filtered.append(signal)
+    return filtered
+
+
+def _sort_market_signals(signals: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    sort_by = str(config.get("local_sort_by") or config.get("market_sort_by") or "").strip()
+    if not sort_by:
+        return signals
+    allowed = {
+        "heat_score",
+        "views",
+        "wants",
+        "views_delta",
+        "wants_delta",
+        "title_density",
+        "title_cluster_seller_count",
+        "crawl_time",
+        "price",
+    }
+    if sort_by not in allowed:
+        return signals
+    reverse = str(config.get("local_sort_order", "desc")).lower() != "asc"
+
+    def sort_key(signal: Dict[str, Any]) -> tuple:
+        if sort_by == "crawl_time":
+            parsed = _parse_market_timestamp(signal.get("crawl_time"))
+            return (parsed.timestamp() if parsed else 0.0, float(signal.get("heat_score", 0.0)))
+        value = signal.get(sort_by)
+        if value is None:
+            value = 0.0
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return (number, float(signal.get("heat_score", 0.0)))
+
+    return sorted(signals, key=sort_key, reverse=reverse)
+
+
 def parse_goofish_result_record(raw: Dict[str, Any], task_keywords: Iterable[str]) -> Optional[Dict[str, Any]]:
     product = raw.get("商品信息") or raw.get("商品信息".encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")) or {}
     if not isinstance(product, dict):
         product = {}
+    seller = raw.get("卖家信息") or {}
+    if not isinstance(seller, dict):
+        seller = {}
     ai = raw.get("ai_analysis") or {}
     price_insight = raw.get("price_insight") or {}
     title = get_first(product, ["商品标题", "title", "标题"], "")
@@ -562,6 +765,7 @@ def parse_goofish_result_record(raw: Dict[str, Any], task_keywords: Iterable[str
     keyword_hit_count = int(ai.get("keyword_hit_count") or 0)
     is_recommended = bool(ai.get("is_recommended"))
     terms = _market_terms_from_record({"title": title, "ai_analysis": ai}, task_keywords)
+    heat_score = _base_market_heat_score(views, wants, keyword_hit_count, is_recommended)
     strength = 1.0 + min(8.0, wants * 0.35) + min(6.0, views * 0.04)
     strength += keyword_hit_count * 1.5
     if is_recommended:
@@ -573,16 +777,20 @@ def parse_goofish_result_record(raw: Dict[str, Any], task_keywords: Iterable[str
         "price": price,
         "wants": wants,
         "views": views,
+        "item_id": get_first(product, ["商品ID", "item_id", "id"], ""),
         "publish_time": get_first(product, ["发布时间", "publish_time"], ""),
         "crawl_time": raw.get("爬取时间"),
         "link": get_first(product, ["商品链接", "link"], ""),
         "search_keyword": raw.get("搜索关键字"),
         "task_name": raw.get("任务名称"),
+        "seller_nickname": get_first(seller, ["卖家昵称", "seller_nickname"], "")
+        or get_first(product, ["卖家昵称", "seller_nickname"], ""),
         "is_recommended": is_recommended,
         "analysis_source": ai.get("analysis_source"),
         "keyword_hit_count": keyword_hit_count,
         "matched_keywords": list(ai.get("matched_keywords") or []),
         "terms": terms,
+        "heat_score": round(heat_score, 1),
         "strength": round(strength, 2),
     }
 
@@ -596,8 +804,9 @@ def fetch_goofish_market_signals(task: Dict[str, Any]) -> Dict[str, Any]:
         or os.getenv("GOOFISH_API_BASE_URL")
         or "https://goofish.xiaolicloud.cn:18443"
     ).rstrip("/")
-    limit = max(1, min(int(config.get("limit", 100)), 100))
-    max_files = max(1, min(int(config.get("max_files", 3)), 10))
+    limit = _as_int_config(config, "limit", 100, minimum=1, maximum=100)
+    max_files = _as_int_config(config, "max_files", 3, minimum=1, maximum=10)
+    result_pages = _as_int_config(config, "result_pages", 1, minimum=1, maximum=10)
     result_keywords = [_normalise_term(value) for value in config.get("result_keywords", []) if str(value).strip()]
     task_keywords = [str(value) for value in task.get("keywords", []) if str(value).strip()]
     timeout = int(config.get("timeout", 30))
@@ -609,25 +818,39 @@ def fetch_goofish_market_signals(task: Dict[str, Any]) -> Dict[str, Any]:
         files = files[:max_files]
         signals: List[Dict[str, Any]] = []
         for filename in files:
-            query = urlencode(
-                {
-                    "limit": limit,
-                    "page": 1,
-                    "sort_by": config.get("sort_by", "crawl_time"),
-                    "sort_order": config.get("sort_order", "desc"),
-                    "include_hidden": str(bool(config.get("include_hidden", False))).lower(),
-                }
-            )
-            url = f"{base_url}/api/results/{quote(filename, safe='')}?{query}"
-            payload = http_json(url, timeout=timeout)
-            for raw in payload.get("items", []):
-                if not isinstance(raw, dict) or raw.get("_effective_hidden"):
-                    continue
-                signal = parse_goofish_result_record(raw, task_keywords)
-                if signal:
-                    signal["result_file"] = filename
-                    signals.append(signal)
-        LOGGER.info("goofish_market fetched files=%s signals=%s", len(files), len(signals))
+            for page in range(1, result_pages + 1):
+                query = urlencode(
+                    {
+                        "limit": limit,
+                        "page": page,
+                        "sort_by": config.get("sort_by", "crawl_time"),
+                        "sort_order": config.get("sort_order", "desc"),
+                        "include_hidden": str(bool(config.get("include_hidden", False))).lower(),
+                    }
+                )
+                url = f"{base_url}/api/results/{quote(filename, safe='')}?{query}"
+                payload = http_json(url, timeout=timeout)
+                raw_items = payload.get("items", [])
+                if not raw_items:
+                    break
+                for raw in raw_items:
+                    if not isinstance(raw, dict) or raw.get("_effective_hidden"):
+                        continue
+                    signal = parse_goofish_result_record(raw, task_keywords)
+                    if signal:
+                        signal["result_file"] = filename
+                        signals.append(signal)
+                if len(raw_items) < limit:
+                    break
+        fetched_count = len(signals)
+        signals = _annotate_market_heat(signals)
+        if str(config.get("signal_mode", "")).lower() == "heat":
+            for signal in signals:
+                signal["relevance_strength"] = signal.get("strength", 0.0)
+                signal["strength"] = round(max(float(signal.get("strength", 0.0)), float(signal.get("heat_score", 0.0)) / 2.0), 2)
+        signals = _filter_market_signals(signals, config)
+        signals = _sort_market_signals(signals, config)
+        LOGGER.info("goofish_market fetched files=%s signals=%s filtered=%s", len(files), fetched_count, len(signals))
         return {"enabled": True, "signals": signals, "files": files, "error": ""}
     except Exception as exc:  # noqa: BLE001 - market signals are optional.
         LOGGER.exception("goofish_market fetch failed")
@@ -657,6 +880,12 @@ def apply_market_signals(item: Dict[str, Any], signals: List[Dict[str, Any]]) ->
                     "price": signal.get("price"),
                     "wants": signal.get("wants"),
                     "views": signal.get("views"),
+                    "heat_score": signal.get("heat_score"),
+                    "views_delta": signal.get("views_delta"),
+                    "wants_delta": signal.get("wants_delta"),
+                    "title_density": signal.get("title_density"),
+                    "title_cluster_seller_count": signal.get("title_cluster_seller_count"),
+                    "seller_repeat_count": signal.get("seller_repeat_count"),
                     "matched_terms": terms,
                     "is_recommended": signal.get("is_recommended"),
                     "link": signal.get("link"),

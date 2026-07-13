@@ -364,6 +364,99 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(boosted["market_price_max"], 9.9)
         self.assertEqual(boosted["market_reference_titles"][0]["link"], "https://goofish.test/item")
 
+    def test_goofish_market_heat_signals_filter_and_sort(self):
+        records = [
+            {
+                "爬取时间": "2026-07-13T10:00:00+08:00",
+                "搜索关键字": "AI课程",
+                "任务名称": "AI虚拟课程热度关键词监控",
+                "商品信息": {
+                    "商品ID": "low",
+                    "商品标题": "Coze 工作流 AI课程",
+                    "当前售价": "¥3.9",
+                    "“想要”人数": 0,
+                    "浏览量": 5,
+                    "卖家昵称": "卖家A",
+                    "商品链接": "https://goofish.test/item?id=low",
+                },
+                "ai_analysis": {"is_recommended": True, "matched_keywords": ["Coze"], "keyword_hit_count": 1},
+            },
+            {
+                "爬取时间": "2026-07-13T10:00:00+08:00",
+                "搜索关键字": "AI课程",
+                "任务名称": "AI虚拟课程热度关键词监控",
+                "商品信息": {
+                    "商品ID": "rising",
+                    "商品标题": "RAG 项目实战 AI课程",
+                    "当前售价": "¥9.9",
+                    "“想要”人数": 1,
+                    "浏览量": 30,
+                    "卖家昵称": "卖家B",
+                    "商品链接": "https://goofish.test/item?id=rising",
+                },
+                "ai_analysis": {"is_recommended": True, "matched_keywords": ["RAG"], "keyword_hit_count": 1},
+            },
+            {
+                "爬取时间": "2026-07-13T11:00:00+08:00",
+                "搜索关键字": "AI课程",
+                "任务名称": "AI虚拟课程热度关键词监控",
+                "商品信息": {
+                    "商品ID": "rising",
+                    "商品标题": "RAG 项目实战 AI课程",
+                    "当前售价": "¥9.9",
+                    "“想要”人数": 4,
+                    "浏览量": 80,
+                    "卖家昵称": "卖家B",
+                    "商品链接": "https://goofish.test/item?id=rising",
+                },
+                "ai_analysis": {"is_recommended": True, "matched_keywords": ["RAG"], "keyword_hit_count": 1},
+            },
+            {
+                "爬取时间": "2026-07-13T11:05:00+08:00",
+                "搜索关键字": "AI课程",
+                "任务名称": "AI虚拟课程热度核心热点",
+                "商品信息": {
+                    "商品ID": "top",
+                    "商品标题": "AIGC 视频制作 AI课程",
+                    "当前售价": "¥19.9",
+                    "“想要”人数": 8,
+                    "浏览量": 120,
+                    "卖家昵称": "卖家C",
+                    "商品链接": "https://goofish.test/item?id=top",
+                },
+                "ai_analysis": {"is_recommended": True, "matched_keywords": ["AIGC"], "keyword_hit_count": 1},
+            },
+        ]
+
+        def fake_http_json(url, **_kwargs):
+            if url.endswith("/api/results/files"):
+                return {"files": ["AI课程_full_data.jsonl"]}
+            return {"items": records}
+
+        task = {
+            "keywords": ["RAG", "AIGC", "Coze"],
+            "goofish_market": {
+                "enabled": True,
+                "base_url": "https://goofish.test",
+                "result_keywords": ["AI课程"],
+                "limit": 100,
+                "result_pages": 1,
+                "signal_mode": "heat",
+                "local_sort_by": "views",
+                "local_sort_order": "desc",
+                "min_views": 20,
+            },
+        }
+        with patch.object(pipeline, "http_json", side_effect=fake_http_json):
+            market = pipeline.fetch_goofish_market_signals(task)
+
+        signals = market["signals"]
+        self.assertEqual([signal["views"] for signal in signals], [120.0, 80.0, 30.0])
+        self.assertGreater(signals[0]["heat_score"], 0)
+        rising = [signal for signal in signals if signal["item_id"] == "rising"]
+        self.assertEqual(rising[0]["views_delta"], 50.0)
+        self.assertEqual(rising[0]["wants_delta"], 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

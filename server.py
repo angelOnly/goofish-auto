@@ -3,12 +3,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import threading
+import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
 LOGGER = logging.getLogger("goofish_auto.server")
+LOCAL_RUN_JOBS: dict[str, dict[str, object]] = {}
+LOCAL_RUN_LOCK = threading.Lock()
 
 try:
     from .goofish_tasks import (
@@ -103,7 +109,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
         <label class="row"><input id="includeSeen" type="checkbox"> 包含已发布</label>
         <button id="runBtn">运行一次</button>
       </div>
-      <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI虚拟课程选品整理”任务；本地资源池不按发布时间硬过滤，会按课程/教程/资料/项目实战类内容筛选，并排除远程安装、账号卡密和实体商品。下面的“闲鱼热点监控”才限制最近 14 天新发布商品。</div>
+      <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI虚拟课程选品整理”任务；本地资源池不按发布时间硬过滤，会按课程/教程/资料/项目实战类内容筛选，并排除远程安装、账号卡密和实体商品。下面的“闲鱼热点监控”分成新品监控和热度监控两条轨道。</div>
       <div id="localStatus" class="status"></div>
       <div id="runs"></div>
     </div>
@@ -115,7 +121,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
         <button class="secondary" id="previewBootstrapBtn">预览本地配置</button>
         <button id="startBootstrapBtn">同步/更新任务到闲鱼监控</button>
       </div>
-      <div class="help">“预览本地配置”只查看将要提交的 2 个任务，不会创建。“创建缺失任务到闲鱼监控”会调用远程 API：远程没有同名任务就创建并启动，已有同名任务就跳过，不会更新或覆盖旧任务。当前监控只看虚拟课程/资料/项目实战类商品，排除远程安装、账号卡密和实体商品；上新范围使用 `14天内`，cron 为 `0 */12 * * *`。</div>
+      <div class="help">“预览本地配置”只查看将要提交的 4 个任务，不会创建。“创建缺失任务到闲鱼监控”会调用远程 API：远程没有同名任务就创建并启动，已有同名任务会按本地配置更新。当前监控只看虚拟课程/资料/项目实战类商品，排除远程安装、账号卡密和实体商品；新品任务限制 `14天内`，热度任务不限制上新时间并翻 5 页。</div>
       <div id="goofishStatus" class="status"></div>
       <div id="goofishTasks"></div>
     </div>
@@ -137,14 +143,26 @@ let expandedFolder = null;
 function esc(value){
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+function cleanErrorText(value){
+  const raw = String(value || '').trim();
+  if(!raw) return '未知错误';
+  if(/<html|<body|<title/i.test(raw)){
+    const plain = raw.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();
+    if(/504 Gateway (Time-out|Timeout)/i.test(plain)) return '网关 504 超时：任务或上游网站响应太久。现在本地整理已改为后台运行，请稍后刷新最近运行记录。';
+    if(/502 Bad Gateway/i.test(plain)) return '网关 502：上游网站临时异常，请稍后重试。';
+    return plain.slice(0, 500) || '上游返回了 HTML 错误页';
+  }
+  return raw.slice(0, 1000);
+}
 async function api(path, options={}){
   const response = await fetch(path, options);
   const text = await response.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = {error:text}; }
-  if(!response.ok) throw new Error(data.error || response.statusText);
+  if(!response.ok) throw new Error(cleanErrorText(data.error || response.statusText));
   return data;
 }
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 function setStatus(id, text, cls=''){
   const el=$(id); el.className = 'status ' + cls; el.textContent = text;
 }
@@ -303,16 +321,34 @@ async function runLocalTask(){
   const btn=$('runBtn'); btn.disabled=true; setStatus('localStatus','运行中，请稍等...');
   try{
     const data = await api('/api/local/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:$('localTask').value,include_seen:$('includeSeen').checked})});
-    const reason = data.diagnostics?.zero_reason;
-    if((data.count || 0) === 0 && reason){
+    const result = data.job_id ? await waitLocalRun(data.job_id, data.started_at) : data;
+    const reason = result.diagnostics?.zero_reason;
+    if((result.count || 0) === 0 && reason){
       setStatus('localStatus',`完成但没有输出：${reason}`,'warn');
     }else{
-      setStatus('localStatus',`完成：${data.count || 0} 条，输出目录 ${data.run_id}`,'ok');
+      setStatus('localStatus',`完成：${result.count || 0} 条，输出目录 ${result.run_id}`,'ok');
     }
     await loadRuns();
-    await showRun(data.run_id);
+    await showRun(result.run_id);
   }catch(e){ setStatus('localStatus', e.message, 'bad'); }
   finally{ btn.disabled=false; }
+}
+async function waitLocalRun(jobId, startedAt=null){
+  let attempts = 0;
+  while(true){
+    attempts += 1;
+    await sleep(2000);
+    const data = await api(`/api/local/run-status?job_id=${encodeURIComponent(jobId)}`);
+    const elapsed = startedAt ? Math.max(0, Math.round(Date.now() / 1000 - Number(startedAt))) : attempts * 2;
+    if(data.status === 'running'){
+      setStatus('localStatus',`后台运行中，已等待 ${elapsed} 秒。会员网盘抓取会按间隔慢慢跑，页面不用一直卡着。`);
+      continue;
+    }
+    if(data.status === 'done'){
+      return data.result || {};
+    }
+    throw new Error(cleanErrorText(data.error || '本地资源整理失败'));
+  }
 }
 async function showRun(runId){
   const data = await api(`/api/local/runs/${encodeURIComponent(runId)}`);
@@ -364,7 +400,7 @@ async function showItem(folder){
       const price = ref.price ? ` <small>¥${esc(ref.price)}</small>` : '';
       const fullTitle = String(ref.title || `同行${index + 1}`);
       const label = shortText(fullTitle, 5);
-      const tooltip = [fullTitle, ref.price ? `¥${ref.price}` : '', ref.wants ? `${ref.wants}想要` : '', ref.views ? `${ref.views}浏览` : ''].filter(Boolean).join(' / ');
+      const tooltip = [fullTitle, ref.price ? `¥${ref.price}` : '', ref.wants ? `${ref.wants}想要` : '', ref.views ? `${ref.views}浏览` : '', ref.heat_score ? `热度${ref.heat_score}` : '', ref.title_density ? `同类${ref.title_density}` : ''].filter(Boolean).join(' / ');
       return ref.link
         ? `<span><a href="${esc(ref.link)}" target="_blank" rel="noreferrer" title="${esc(tooltip)}">${esc(label)}</a>${price}</span>`
         : `<span title="${esc(tooltip)}">${esc(label)}${price}</span>`;
@@ -467,7 +503,7 @@ async function previewBootstrap(){
   finally{ btn.disabled = false; }
 }
 async function startBootstrap(){
-  if(!confirm('确认把 goofish_tasks.json 里的 2 个任务创建到闲鱼监控？远程已有同名任务会跳过，只创建缺失任务。')) return;
+  if(!confirm('确认把 goofish_tasks.json 里的 4 个任务同步到闲鱼监控？远程已有同名任务会按本地配置更新，缺失任务会创建。')) return;
   const btn = $('startBootstrapBtn');
   btn.disabled = true;
   setStatus('goofishStatus','正在创建远程缺失任务，并启动新创建的任务。当前配置只看文本，不分析图片...');
@@ -557,6 +593,88 @@ def _goofish_client() -> GoofishClient:
         poll_seconds=float(os.getenv("GOOFISH_POLL_SECONDS", "2")),
         max_wait_seconds=int(os.getenv("GOOFISH_MAX_WAIT_SECONDS", "1800")),
     )
+
+
+def _clean_error_message(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "未知错误"
+    lower = text.lower()
+    if "<html" in lower or "<body" in lower or "<title>" in lower:
+        plain = re.sub(r"<[^>]+>", " ", text)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if "504 gateway time-out" in plain.lower() or "504 gateway timeout" in plain.lower():
+            return "网关 504 超时：任务或上游网站响应太久。任务已改为后台运行；请刷新最近运行记录或稍后重试。"
+        if "502 bad gateway" in plain.lower():
+            return "网关 502：上游网站临时异常，请稍后重试。"
+        return plain[:500] or "上游返回了 HTML 错误页"
+    return text[:1000]
+
+
+def _job_snapshot(job_id: str) -> dict[str, object]:
+    with LOCAL_RUN_LOCK:
+        job = dict(LOCAL_RUN_JOBS.get(job_id) or {})
+    if not job:
+        return {"job_id": job_id, "status": "missing", "error": "任务不存在或服务已重启"}
+    return job
+
+
+def _finish_local_run_job(job_id: str, result: dict[str, object] | None = None, error: object = None) -> None:
+    with LOCAL_RUN_LOCK:
+        job = LOCAL_RUN_JOBS.get(job_id)
+        if not job:
+            return
+        job["finished_at"] = time.time()
+        if error is None:
+            job["status"] = "done"
+            job["result"] = result or {}
+            job["run_id"] = (result or {}).get("run_id", "")
+            job["count"] = (result or {}).get("count", 0)
+        else:
+            job["status"] = "error"
+            job["error"] = _clean_error_message(error)
+
+
+def _run_local_job(job_id: str, task_name: str, include_seen: bool) -> None:
+    try:
+        LOGGER.info("local_run background start job_id=%s task=%s include_seen=%s", job_id, task_name, include_seen)
+        result = run_named_task(task_name, include_seen=include_seen)
+        diagnostics = result.get("diagnostics", {}) if isinstance(result, dict) else {}
+        LOGGER.info(
+            "local_run background done job_id=%s task=%s run_id=%s count=%s diagnostics=%s",
+            job_id,
+            task_name,
+            result.get("run_id") if isinstance(result, dict) else "",
+            result.get("count") if isinstance(result, dict) else "",
+            diagnostics,
+        )
+        _finish_local_run_job(job_id, result=result if isinstance(result, dict) else {})
+    except Exception as exc:  # noqa: BLE001 - surfaced through the job status API
+        LOGGER.exception("local_run background failed job_id=%s task=%s", job_id, task_name)
+        _finish_local_run_job(job_id, error=exc)
+
+
+def _start_local_run_job(task_name: str, include_seen: bool) -> dict[str, object]:
+    job_id = uuid.uuid4().hex
+    now = time.time()
+    with LOCAL_RUN_LOCK:
+        LOCAL_RUN_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "task_name": task_name,
+            "include_seen": include_seen,
+            "started_at": now,
+        }
+        finished_jobs = [
+            (str(job.get("job_id")), float(job.get("finished_at") or 0))
+            for job in LOCAL_RUN_JOBS.values()
+            if job.get("status") in {"done", "error"}
+        ]
+        for old_job_id, _ in sorted(finished_jobs, key=lambda item: item[1], reverse=True)[20:]:
+            LOCAL_RUN_JOBS.pop(old_job_id, None)
+    thread = threading.Thread(target=_run_local_job, args=(job_id, task_name, include_seen), daemon=True)
+    thread.start()
+    return _job_snapshot(job_id)
 
 
 def _safe_output_path(relative_path: str) -> Path:
@@ -663,7 +781,7 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     def _send_error(self, status: int, exc: Exception) -> None:
-        self._send(status, {"error": str(exc)})
+        self._send(status, {"error": _clean_error_message(exc)})
 
     def do_GET(self) -> None:  # noqa: N802
         try:
@@ -694,6 +812,15 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/local/item":
                 folder = parse_qs(parsed.query).get("folder", [""])[0]
                 self._send(200, _read_output_item(folder))
+            elif path == "/api/local/run-status":
+                query = parse_qs(parsed.query)
+                job_id = (query.get("job_id") or query.get("id") or [""])[0]
+                if not job_id:
+                    self._send(400, {"error": "缺少 job_id"})
+                else:
+                    snapshot = _job_snapshot(job_id)
+                    status = 404 if snapshot.get("status") == "missing" else 200
+                    self._send(status, snapshot)
             elif path == "/api/goofish/config":
                 base_url = _goofish_base_url()
                 self._send(
@@ -721,19 +848,7 @@ class Handler(BaseHTTPRequestHandler):
                 task_name = str(body["task"])
                 include_seen = bool(body.get("include_seen", False))
                 LOGGER.info("local_run request task=%s include_seen=%s", task_name, include_seen)
-                result = run_named_task(
-                    task_name,
-                    include_seen=include_seen,
-                )
-                diagnostics = result.get("diagnostics", {}) if isinstance(result, dict) else {}
-                LOGGER.info(
-                    "local_run done task=%s run_id=%s count=%s diagnostics=%s",
-                    task_name,
-                    result.get("run_id") if isinstance(result, dict) else "",
-                    result.get("count") if isinstance(result, dict) else "",
-                    diagnostics,
-                )
-                self._send(200, result)
+                self._send(202, _start_local_run_job(task_name, include_seen))
             elif path == "/api/goofish/bootstrap/dry-run":
                 result = create_from_specs(_goofish_client(), load_specs(), dry_run=True)
                 self._send(200, result)

@@ -1,6 +1,7 @@
 import unittest
 import json
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,23 @@ _delivery_payload = server._delivery_payload
 
 
 class ServerTests(unittest.TestCase):
+    def test_clean_error_message_summarizes_gateway_html(self):
+        message = server._clean_error_message("<html><title>504 Gateway Time-out</title><body>openresty</body></html>")
+        self.assertIn("504", message)
+        self.assertNotIn("<html>", message)
+
+    def test_local_run_job_finishes_in_background(self):
+        with patch.object(server, "run_named_task", return_value={"run_id": "run-1", "count": 2, "diagnostics": {}}):
+            job = server._start_local_run_job("测试任务", False)
+            job_id = str(job["job_id"])
+            for _ in range(20):
+                snapshot = server._job_snapshot(job_id)
+                if snapshot.get("status") == "done":
+                    break
+                time.sleep(0.05)
+        self.assertEqual(snapshot["status"], "done")
+        self.assertEqual(snapshot["result"]["run_id"], "run-1")
+
     def test_delivery_payload_contains_only_link_and_password(self):
         payload, status = _delivery_payload(
             {
