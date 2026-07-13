@@ -112,7 +112,17 @@ def load_env_file(path: Path = ENV_FILE) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"\'')
-        if key == "THEITZY_COOKIE":
+        reloadable_keys = {
+            "THEITZY_COOKIE",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_MODEL",
+            "OPENAI_MODEL_NAME",
+            "AI_API_KEY",
+            "AI_BASE_URL",
+            "AI_MODEL",
+        }
+        if key in reloadable_keys:
             os.environ[key] = value
         else:
             os.environ.setdefault(key, value)
@@ -892,21 +902,49 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
     )
 
 
+def ai_copy_config() -> Dict[str, str]:
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("AI_API_KEY") or ""
+    base_url = (os.getenv("OPENAI_BASE_URL") or os.getenv("AI_BASE_URL") or "").rstrip("/")
+    model = os.getenv("OPENAI_MODEL_NAME") or os.getenv("OPENAI_MODEL") or os.getenv("AI_MODEL") or ""
+    return {"api_key": api_key, "base_url": base_url, "model": model}
+
+
+def ai_copy_configured() -> bool:
+    config = ai_copy_config()
+    return bool(config["api_key"] and config["base_url"] and config["model"])
+
+
 def maybe_ai_copy(item: Dict[str, Any], task: Dict[str, Any]) -> Optional[str]:
-    if not task.get("rights_confirmed") or not os.getenv("AI_API_KEY"):
+    config = ai_copy_config()
+    if not config["api_key"]:
         return None
-    base_url = os.getenv("AI_BASE_URL", "").rstrip("/")
-    model = os.getenv("AI_MODEL", "")
+    base_url = config["base_url"]
+    model = config["model"]
     if not base_url or not model:
         return None
+    member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else {}
+    delivery_ready = bool(task.get("rights_confirmed") and member_delivery.get("links"))
     prompt = (
-        "你是电商文案编辑，只能根据下面的已授权数字产品元数据写一版中文闲鱼草稿。"
-        "不得声称官方授权、不得虚构目录/时长/格式/售后，不得使用夸张承诺。输出：标题、卖点、交付说明、注意事项。\n"
+        "你是闲鱼数字课程商品文案编辑。请根据下面的课程元数据写一版可直接复制到闲鱼的中文商品文案。"
+        "要求：\n"
+        "1. 不声称官方授权，不虚构目录、时长、格式、售后或效果承诺。\n"
+        "2. 不在商品文案里暴露百度网盘链接或提取码。\n"
+        "3. 语气自然，适合个人卖家，避免夸张营销词。\n"
+        "4. 输出结构固定为：标题、正文、适合人群、交付说明、注意事项、标签。\n"
+        "5. 如果 delivery_ready=false，只能写“拍下前先确认内容清单”，不要写自动发货或网盘已备好。\n"
+        "6. 如果 delivery_ready=true，可以写“拍下后发送百度网盘链接和提取码”。\n"
         + json.dumps(
             {
                 "title": item.get("title"),
                 "categories": item.get("categories"),
                 "summary": item.get("summary"),
+                "market_median_price": item.get("market_median_price"),
+                "market_price_min": item.get("market_price_min"),
+                "market_price_max": item.get("market_price_max"),
+                "market_matched_terms": item.get("market_matched_terms", []),
+                "rights_confirmed": bool(task.get("rights_confirmed")),
+                "delivery_ready": delivery_ready,
+                "delivery_format": "百度网盘链接+提取码/文件密码" if delivery_ready else "待审核确认",
             },
             ensure_ascii=False,
         )
@@ -924,7 +962,7 @@ def maybe_ai_copy(item: Dict[str, Any], task: Dict[str, Any]) -> Optional[str]:
             f"{base_url}/chat/completions",
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {os.environ['AI_API_KEY']}",
+                "Authorization": f"Bearer {config['api_key']}",
                 "Content-Type": "application/json",
                 "User-Agent": USER_AGENT,
             },
@@ -1078,6 +1116,8 @@ def should_reuse_cached_item(cached: Dict[str, Any], task: Dict[str, Any]) -> bo
     configured_links = [str(link) for link in task.get("owned_delivery_links", []) if str(link).strip()]
     cached_links = [str(link) for link in cached.get("delivery_links", []) if str(link).strip()]
     if configured_links != cached_links:
+        return False
+    if ai_copy_configured() and cached.get("copy_source") != "ai":
         return False
     source_config = task.get("source_config") or {}
     needs_member_delivery = bool(source_config.get("fetch_member_delivery") and task.get("rights_confirmed"))
@@ -1347,10 +1387,14 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         for item in items
         if isinstance(item.get("member_delivery"), dict) and item["member_delivery"].get("links")
     )
+    diagnostics["ai_copy_count"] = sum(1 for item in items if item.get("copy_source") == "ai")
+    diagnostics["ai_model"] = ai_copy_config()["model"] if ai_copy_configured() else ""
     note(
         "items_enriched",
         reused_unpublished_count=diagnostics["reused_unpublished_count"],
         member_delivery_found_count=diagnostics["member_delivery_found_count"],
+        ai_copy_count=diagnostics["ai_copy_count"],
+        ai_model=diagnostics["ai_model"],
     )
 
     for index, item in enumerate(items, start=1):

@@ -215,8 +215,9 @@ function renderDiagnostics(data){
   const reused = d.reused_unpublished_count ? `；复用未发布缓存 ${esc(d.reused_unpublished_count)} 条` : '';
   const memberDelivery = d.member_delivery_found_count ? `；会员网盘链接 ${esc(d.member_delivery_found_count)} 条` : '';
   const cookieValid = d.member_cookie_validated ? '；会员 Cookie 已校验' : '';
+  const aiCopy = d.ai_model ? `；AI文案 ${esc(d.ai_copy_count ?? 0)} 条（${esc(d.ai_model)}）` : '';
   const marketError = d.market_error ? `<p class="warn">闲鱼市场信号读取失败：${esc(d.market_error)}</p>` : '';
-  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}${aiCopy}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
 }
 function detailRowFor(folder){
   return [...document.querySelectorAll('.inline-detail-row')].find(row => row.dataset.detailFor === folder);
@@ -259,11 +260,18 @@ function marketPriceCell(item){
   if(!hasPrice(item?.market_median_price)){
     return '<span class="muted">无价格</span>';
   }
+  const refs = (item.market_reference_titles || []).filter(ref => ref?.link);
   const range = hasPrice(item.market_price_min) && hasPrice(item.market_price_max) && Number(item.market_price_min) !== Number(item.market_price_max)
     ? `<br><small>¥${esc(money(item.market_price_min))}-${esc(money(item.market_price_max))}</small>`
     : '';
   const count = item.market_reference_count ? `<br><small>${esc(item.market_reference_count)} 条样本</small>` : '';
-  return `<strong>¥${esc(money(item.market_median_price))}</strong>${range}${count}`;
+  const links = refs.length ? `<br><small><a href="${esc(refs[0].link)}" target="_blank" rel="noreferrer">看同行</a></small>` : '';
+  return `<strong>¥${esc(money(item.market_median_price))}</strong>${range}${count}${links}`;
+}
+function copySourceLabel(source){
+  return source === 'ai'
+    ? '<span class="pill ok">AI生成</span>'
+    : '<span class="pill">模板</span>';
 }
 
 async function loadConfig(){
@@ -335,7 +343,7 @@ async function showItem(folder){
   if(button) button.textContent = '收起';
   const data = await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
   currentItem = data;
-  const copyText = data.copy_suggested || data.copy;
+  const copyText = data.copy_display || data.copy || data.copy_suggested;
   expandedFolder = folder;
   if(detailRow){
     const imagePreview = data.cover_url
@@ -347,10 +355,18 @@ async function showItem(folder){
         </div>`
       : `<p class="tiny">这个条目没有公开图片。</p>`;
     const marketTerms = (data.item?.market_matched_terms || []).slice(0, 8).join(', ');
-    const marketRefs = (data.item?.market_reference_titles || []).slice(0, 3).map(ref => `<li>${esc(ref.title)}${ref.price ? ` <small>¥${esc(ref.price)}</small>` : ''}</li>`).join('');
+    const marketRefs = (data.item?.market_reference_titles || []).slice(0, 5).map(ref => {
+      const price = ref.price ? ` <small>¥${esc(ref.price)}</small>` : '';
+      const stats = [ref.wants ? `${esc(ref.wants)}想要` : '', ref.views ? `${esc(ref.views)}浏览` : ''].filter(Boolean).join(' / ');
+      const statsText = stats ? ` <small>${stats}</small>` : '';
+      const title = esc(ref.title || '同行商品');
+      return ref.link
+        ? `<li><a href="${esc(ref.link)}" target="_blank" rel="noreferrer">${title}</a>${price}${statsText}</li>`
+        : `<li>${title}${price}${statsText}</li>`;
+    }).join('');
     const priceText = marketPriceText(data.item);
     const marketHtml = marketTerms
-      ? `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">闲鱼匹配：${esc(marketTerms)}</p>${marketRefs ? `<ul class="tiny">${marketRefs}</ul>` : ''}`
+      ? `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">闲鱼匹配：${esc(marketTerms)}</p>${marketRefs ? `<p class="tiny">同行样本：</p><ul class="tiny">${marketRefs}</ul>` : ''}`
       : `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">暂无闲鱼市场匹配。</p>`;
     const deliveryStateHtml = data.delivery_payload
       ? `<p class="tiny ok">发货链接：${esc(data.delivery_status_text || '已获取')}</p>`
@@ -361,9 +377,9 @@ async function showItem(folder){
     detailRow.querySelector('td').innerHTML =
       `<div class="inline-copy-panel">
         <div class="inline-copy-head">
-          <h3>闲鱼文案预览</h3>
+          <h3>闲鱼文案预览 ${copySourceLabel(data.copy_source)}</h3>
           <div class="inline-copy-actions">
-            <button class="secondary mini js-copy-inline" data-field="copy_suggested">复制文案</button>
+            <button class="secondary mini js-copy-inline" data-field="copy_display">复制文案</button>
             <button class="secondary mini js-copy-inline" data-field="delivery_payload">复制发货</button>
             <button class="secondary mini js-copy-inline" data-field="page_url">复制来源链接</button>
             <button class="secondary mini js-show-full" data-folder="${esc(folder)}">看完整</button>
@@ -380,7 +396,7 @@ async function showItem(folder){
 async function showFullItem(folder){
   const data = currentItem?.folder === folder ? currentItem : await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
   currentItem = data;
-  const copyText = data.copy_suggested || data.copy;
+  const copyText = data.copy_display || data.copy || data.copy_suggested;
   const imageHtml = data.cover_url
     ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">小图只是预览，图片源是原图。点图可新标签打开原图；手机上长按图片可保存原图。</p><a class="thumb-link" target="_blank" rel="noreferrer" href="${esc(data.cover_url)}"><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览" loading="lazy"></a></div>`
     : `<div class="image-box"><h3>图片信息</h3><p class="muted">这个条目没有公开封面地址。正式上架时建议补一张自有/授权封面图或目录图。</p></div>`;
@@ -393,7 +409,7 @@ async function showFullItem(folder){
   $('itemDetail').innerHTML = imageHtml +
     sourceHtml +
     deliveryPayloadHtml +
-    `<h3>完整闲鱼文案</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_suggested">复制文案</button></div><pre>${esc(copyText)}</pre>` +
+    `<h3>完整闲鱼文案 ${copySourceLabel(data.copy_source)}</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_display">复制文案</button></div><pre>${esc(copyText)}</pre>` +
     `<h3>审核信息 delivery.md</h3><pre>${esc(data.delivery)}</pre>`;
   $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
 }
@@ -590,11 +606,15 @@ def _read_output_item(folder: str) -> dict[str, object]:
         item["selection_status"] = statuses.get(str(item["id"]), item.get("selection_status") or {"published": False})
     rights_confirmed = item.get("rights_review") == "confirmed"
     copy_suggested = template_copy(item, {"rights_confirmed": rights_confirmed}) if item else ""
+    copy_text = copy_path.read_text(encoding="utf-8") if copy_path.exists() else ""
+    copy_display = copy_text or copy_suggested
     delivery_payload, delivery_status_text = _delivery_payload(item)
     return {
         "folder": folder,
-        "copy": copy_path.read_text(encoding="utf-8") if copy_path.exists() else "",
+        "copy": copy_text,
+        "copy_display": copy_display,
         "copy_suggested": copy_suggested,
+        "copy_source": item.get("copy_source", "template"),
         "delivery": delivery_path.read_text(encoding="utf-8") if delivery_path.exists() else "",
         "delivery_payload": delivery_payload,
         "delivery_status_text": delivery_status_text,

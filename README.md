@@ -53,7 +53,7 @@ python .\cli.py goofish-create --task "近15天AI虚拟课程核心热点" --sta
 
 ## 让文案进入“可发布”状态
 
-默认任务 `rights_confirmed=false`，输出会明确标记“禁止发布”。只有你确认商品内容有自有/正版分发权后，才把对应任务改成 `true`，再把你自己的网盘交付链接填入 `owned_delivery_links`。如需调用 OpenAI 兼容接口生成文案，复制 `.env.example` 为 `.env` 并填写 `AI_API_KEY`、`AI_BASE_URL`、`AI_MODEL`；文案仍需人工审核。
+默认任务 `rights_confirmed=false`，输出会明确标记“禁止发布”。只有你确认商品内容有自有/正版分发权后，才把对应任务改成 `true`，再把你自己的网盘交付链接填入 `owned_delivery_links`。如需调用 OpenAI 兼容接口生成闲鱼文案，复制 `.env.example` 为 `.env` 并填写 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL_NAME`。页面会优先展示本次 run 保存的 AI 文案，并标记“AI生成/模板”，文案仍需人工审核。
 
 浏览器已经登录并不等于本地 Python 进程能直接复用登录态。要让定时任务请求 TheItzy 会员页，需要在本机 `.env` 填写 `THEITZY_COOKIE`，并把 `tasks.json` 里的 `source_config.fetch_member_delivery` 改成 `true`。启用后，本地资源整理会先请求会员校验页；Cookie 有效才继续跑任务，失效会直接中断。不要把 Cookie 发到聊天或提交到 Git；Cookie 过期后需要重新更新。程序只解析页面里可见的 `pan.baidu.com` 链接和提取码/文件密码，不下载课程文件。
 

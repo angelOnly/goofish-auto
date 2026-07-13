@@ -17,6 +17,7 @@ score_item = pipeline.score_item
 strip_html = pipeline.strip_html
 parse_goofish_result_record = pipeline.parse_goofish_result_record
 apply_market_signals = pipeline.apply_market_signals
+ai_copy_config = pipeline.ai_copy_config
 extract_baidu_delivery_from_html = pipeline.extract_baidu_delivery_from_html
 extract_member_download_context = pipeline.extract_member_download_context
 selection_db_path = pipeline.selection_db_path
@@ -54,6 +55,23 @@ class PipelineTests(unittest.TestCase):
     def test_score_matches_summary_text(self):
         item = score_item({"title": "项目资料", "categories": [], "summary": "包含 Cursor 和 MCP 工作流", "published_at": "2026-07-13T00:00:00+00:00", "cover_url": ""}, ["Cursor", "MCP"])
         self.assertEqual(item["matched_keywords"], ["cursor", "mcp"])
+
+    def test_openai_env_aliases_are_supported(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "key",
+                "OPENAI_BASE_URL": "https://llm.example/v1",
+                "OPENAI_MODEL_NAME": "model-a",
+                "AI_API_KEY": "",
+                "AI_BASE_URL": "",
+                "AI_MODEL": "",
+            },
+        ):
+            self.assertEqual(
+                ai_copy_config(),
+                {"api_key": "key", "base_url": "https://llm.example/v1", "model": "model-a"},
+            )
 
     def test_extracts_baidu_delivery_from_member_html(self):
         delivery = extract_baidu_delivery_from_html(
@@ -301,6 +319,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(boosted["market_median_price"], 9.9)
         self.assertEqual(boosted["market_price_min"], 9.9)
         self.assertEqual(boosted["market_price_max"], 9.9)
+        self.assertEqual(boosted["market_reference_titles"][0]["link"], "https://goofish.test/item")
 
 
 if __name__ == "__main__":
