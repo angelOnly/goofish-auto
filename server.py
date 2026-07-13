@@ -150,10 +150,17 @@ function setStatus(id, text, cls=''){
 function openUrl(url){
   window.open(url, '_blank', 'noopener,noreferrer');
 }
-async function copyText(value, label){
+async function copyText(value, label, button=null){
   const text = String(value || '');
+  const originalText = button?.textContent;
+  const flashButton = (text) => {
+    if(!button) return;
+    button.textContent = text;
+    setTimeout(() => { button.textContent = originalText; }, 1400);
+  };
   if(!text.trim()){
     setStatus('localStatus', `${label}为空，没东西可复制`, 'warn');
+    flashButton('未获取');
     return;
   }
   try{
@@ -169,6 +176,7 @@ async function copyText(value, label){
     textarea.remove();
   }
   setStatus('localStatus', `${label}已复制`, 'ok');
+  flashButton('已复制');
 }
 function taskState(task){
   const enabled = Boolean(task.enabled);
@@ -344,6 +352,9 @@ async function showItem(folder){
     const marketHtml = marketTerms
       ? `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">闲鱼匹配：${esc(marketTerms)}</p>${marketRefs ? `<ul class="tiny">${marketRefs}</ul>` : ''}`
       : `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">暂无闲鱼市场匹配。</p>`;
+    const deliveryStateHtml = data.delivery_payload
+      ? `<p class="tiny ok">发货链接：${esc(data.delivery_status_text || '已获取')}</p>`
+      : `<p class="tiny warn">发货链接：${esc(data.delivery_status_text || '未获取')}</p>`;
     const sourceHtml = data.page_url
       ? `<p class="tiny">来源核验：<a href="${esc(data.page_url)}" target="_blank" rel="noreferrer">课程页</a></p>`
       : '<p class="tiny">这个条目没有公开课程页地址。</p>';
@@ -353,12 +364,13 @@ async function showItem(folder){
           <h3>闲鱼文案预览</h3>
           <div class="inline-copy-actions">
             <button class="secondary mini js-copy-inline" data-field="copy_suggested">复制文案</button>
-            <button class="secondary mini js-copy-inline" data-field="delivery">复制发货</button>
+            <button class="secondary mini js-copy-inline" data-field="delivery_payload">复制发货</button>
             <button class="secondary mini js-copy-inline" data-field="page_url">复制来源链接</button>
             <button class="secondary mini js-show-full" data-folder="${esc(folder)}">看完整</button>
           </div>
         </div>
         ${marketHtml}
+        ${deliveryStateHtml}
         ${sourceHtml}
         ${imagePreview}
         <p class="copy-preview">${esc(copyText)}</p>
@@ -375,10 +387,14 @@ async function showFullItem(folder){
   const sourceHtml = data.page_url
     ? `<h3>来源核验</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="page_url">复制来源链接</button></div><p><a target="_blank" rel="noreferrer" href="${esc(data.page_url)}">${esc(data.page_url)}</a></p>`
     : `<h3>来源核验</h3><p class="muted">这个条目没有公开课程页地址。</p>`;
+  const deliveryPayloadHtml = data.delivery_payload
+    ? `<h3>发货内容</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery_payload">复制发货</button></div><pre>${esc(data.delivery_payload)}</pre>`
+    : `<h3>发货内容</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery_payload">复制发货</button></div><p class="warn">${esc(data.delivery_status_text || '未获取百度网盘链接')}</p>`;
   $('itemDetail').innerHTML = imageHtml +
     sourceHtml +
+    deliveryPayloadHtml +
     `<h3>完整闲鱼文案</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_suggested">复制文案</button></div><pre>${esc(copyText)}</pre>` +
-    `<h3>发货信息 delivery.md</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery">复制发货信息</button></div><pre>${esc(data.delivery)}</pre>`;
+    `<h3>审核信息 delivery.md</h3><pre>${esc(data.delivery)}</pre>`;
   $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
@@ -495,8 +511,8 @@ document.addEventListener('click', (event) => {
   else if(target.id === 'openResultsBtn' || target.classList.contains('js-open-results')) openUrl(goofishUrls.results_url);
   else if(target.classList.contains('js-show-run')) showRun(target.dataset.runId);
   else if(target.classList.contains('js-show-item')) showItem(target.dataset.folder);
-  else if(target.classList.contains('js-copy-field')) copyText(currentItem?.[target.dataset.field], target.textContent.trim());
-  else if(target.classList.contains('js-copy-inline')) copyText(currentItem?.[target.dataset.field], target.textContent.trim());
+  else if(target.classList.contains('js-copy-field')) copyText(currentItem?.[target.dataset.field], target.textContent.trim(), target);
+  else if(target.classList.contains('js-copy-inline')) copyText(currentItem?.[target.dataset.field], target.textContent.trim(), target);
   else if(target.classList.contains('js-show-full')) showFullItem(target.dataset.folder);
   else if(target.classList.contains('js-toggle-published')) togglePublished(target.dataset.courseId, target.dataset.published === 'true');
   else if(target.classList.contains('js-start-remote')) startRemoteTask(target.dataset.taskId);
@@ -530,6 +546,37 @@ def _safe_output_path(relative_path: str) -> Path:
     return candidate
 
 
+def _delivery_payload(item: dict[str, object]) -> tuple[str, str]:
+    member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else {}
+    rights_confirmed = item.get("rights_review") == "confirmed"
+    links = [str(value) for value in member_delivery.get("links", []) if str(value).strip()]
+    passwords = [str(value) for value in member_delivery.get("passwords", []) if str(value).strip()]
+    if rights_confirmed and links:
+        lines: list[str] = []
+        for index, link in enumerate(links, start=1):
+            prefix = "百度网盘链接" if len(links) == 1 else f"百度网盘链接{index}"
+            lines.append(f"{prefix}：{link}")
+        if passwords:
+            lines.append(f"提取码/文件密码：{', '.join(passwords)}")
+        return "\n".join(lines), f"已获取 {len(links)} 条百度网盘链接"
+
+    status = str(member_delivery.get("status") or "")
+    message = str(member_delivery.get("message") or "")
+    if status == "skipped_rights_unconfirmed":
+        return "", "未获取：未确认分发权，程序已跳过会员网盘链接抓取"
+    if status == "missing_cookie":
+        return "", f"未获取：{message or '缺少会员 Cookie'}"
+    if status == "not_found":
+        return "", "未获取：会员页中没有识别到百度网盘链接"
+    if status == "error":
+        return "", f"未获取：会员页请求失败{('：' + message) if message else ''}"
+    if status == "missing_page_url":
+        return "", "未获取：缺少课程页地址"
+    if links and not rights_confirmed:
+        return "", "已解析到链接，但未确认分发权，复制发货已禁用"
+    return "", "未获取：没有百度网盘链接数据"
+
+
 def _read_output_item(folder: str) -> dict[str, object]:
     item_dir = _safe_output_path(folder)
     if not item_dir.is_dir():
@@ -543,11 +590,14 @@ def _read_output_item(folder: str) -> dict[str, object]:
         item["selection_status"] = statuses.get(str(item["id"]), item.get("selection_status") or {"published": False})
     rights_confirmed = item.get("rights_review") == "confirmed"
     copy_suggested = template_copy(item, {"rights_confirmed": rights_confirmed}) if item else ""
+    delivery_payload, delivery_status_text = _delivery_payload(item)
     return {
         "folder": folder,
         "copy": copy_path.read_text(encoding="utf-8") if copy_path.exists() else "",
         "copy_suggested": copy_suggested,
         "delivery": delivery_path.read_text(encoding="utf-8") if delivery_path.exists() else "",
+        "delivery_payload": delivery_payload,
+        "delivery_status_text": delivery_status_text,
         "cover_url": item.get("cover_url", ""),
         "cover_local_path": item.get("cover_local_path", ""),
         "page_url": item.get("page_url", ""),
