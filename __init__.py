@@ -1,0 +1,1 @@
+"""Local resource pipeline package."""

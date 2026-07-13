@@ -1,0 +1,36 @@
+services:
+  pipeline:
+    build:
+      context: .
+    container_name: goofish-resource-pipeline
+    restart: unless-stopped
+    command: ["python", "-m", "resource_pipeline.cli", "serve", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./output:/app/resource_pipeline/output
+    environment:
+      PIPELINE_HOST: 0.0.0.0
+      PIPELINE_PORT: "8765"
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_MODEL: ${AI_MODEL:-}
+      GOOFISH_API_BASE_URL: ${GOOFISH_API_BASE_URL:-https://goofish.xiaolicloud.cn:18443}
+      GOOFISH_API_TOKEN: ${GOOFISH_API_TOKEN:-}
+      GOOFISH_API_TIMEOUT: ${GOOFISH_API_TIMEOUT:-30}
+      GOOFISH_POLL_SECONDS: ${GOOFISH_POLL_SECONDS:-2}
+      GOOFISH_MAX_WAIT_SECONDS: ${GOOFISH_MAX_WAIT_SECONDS:-1800}
+
+  # One-shot task bootstrap. It is behind a profile so a normal `up -d`
+  # does not unexpectedly call the remote task API.
+  goofish-bootstrap:
+    build:
+      context: .
+    profiles: ["bootstrap"]
+    command: ["python", "-m", "resource_pipeline.cli", "goofish-create", "--config", "/app/resource_pipeline/goofish_tasks.json", "--start"]
+    environment:
+      GOOFISH_API_BASE_URL: ${GOOFISH_API_BASE_URL:-https://goofish.xiaolicloud.cn:18443}
+      GOOFISH_API_TOKEN: ${GOOFISH_API_TOKEN:-}
+      GOOFISH_API_TIMEOUT: ${GOOFISH_API_TIMEOUT:-30}
+      GOOFISH_POLL_SECONDS: ${GOOFISH_POLL_SECONDS:-2}
+      GOOFISH_MAX_WAIT_SECONDS: ${GOOFISH_MAX_WAIT_SECONDS:-1800}

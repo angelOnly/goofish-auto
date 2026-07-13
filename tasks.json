@@ -1,0 +1,50 @@
+[
+  {
+    "name": "AI工具与智能体",
+    "source": "theitzy",
+    "keywords": ["人工智能", "AI", "LLM", "RAG", "智能体", "Agent", "MCP", "Claude", "Gemini", "ChatGPT", "n8n", "Cursor", "ComfyUI"],
+    "source_config": {
+      "base_url": "https://theitzy.net",
+      "per_page": 20,
+      "max_pages": 1,
+      "request_interval_seconds": 10,
+      "orderby": "date",
+      "order": "desc"
+    },
+    "rights_confirmed": false,
+    "authorized_assets": false,
+    "owned_delivery_links": []
+  },
+  {
+    "name": "编程与就业技能",
+    "source": "theitzy",
+    "keywords": ["Python", "JavaScript", "TypeScript", "React", "Next.js", "数据分析", "机器学习", "云计算", "DevOps", "AWS", "Kubernetes", "Docker", "网络安全"],
+    "source_config": {
+      "base_url": "https://theitzy.net",
+      "per_page": 20,
+      "max_pages": 1,
+      "request_interval_seconds": 10,
+      "orderby": "date",
+      "order": "desc"
+    },
+    "rights_confirmed": false,
+    "authorized_assets": false,
+    "owned_delivery_links": []
+  },
+  {
+    "name": "设计与内容生产",
+    "source": "theitzy",
+    "keywords": ["Figma", "Photoshop", "Premiere", "Blender", "Unity", "Unreal", "游戏开发", "视频剪辑", "设计模式", "Notion", "Power BI", "Excel"],
+    "source_config": {
+      "base_url": "https://theitzy.net",
+      "per_page": 20,
+      "max_pages": 1,
+      "request_interval_seconds": 10,
+      "orderby": "date",
+      "order": "desc"
+    },
+    "rights_confirmed": false,
+    "authorized_assets": false,
+    "owned_delivery_links": []
+  }
+]
