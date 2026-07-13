@@ -132,6 +132,9 @@ class GoofishClient:
     def start(self, task_id: Any) -> Any:
         return self.request_json("POST", f"/api/tasks/start/{task_id}")
 
+    def stop(self, task_id: Any) -> Any:
+        return self.request_json("POST", f"/api/tasks/stop/{task_id}")
+
 
 def _as_task_list(data: Any) -> List[Dict[str, Any]]:
     if isinstance(data, list):

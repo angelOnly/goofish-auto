@@ -19,7 +19,7 @@ python .\cli.py serve
 
 ## 自动创建闲鱼热点监控任务
 
-`goofish_tasks.json` 是批量任务配置，包含 3 个 AI 判断任务和 1 个关键词快速筛选任务。默认 AI 任务每 6 小时执行一次，关键词任务错开 30 分钟执行；`cron` 可以按你的 API 规则修改。同步器会先调用 `GET /api/tasks` 按任务名去重；AI 任务再调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
+`goofish_tasks.json` 是批量任务配置，现在只保留 2 个低成本监控任务：1 个关键词快速筛选任务 + 1 个 AI 文本判断任务。两者都关闭图片分析（`analyze_images=false`），默认每 12 小时执行一次（`0 */12 * * *`）。同步器会先调用 `GET /api/tasks` 按任务名去重；AI 任务再调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
 
 先预览请求，不访问远端：
 
@@ -42,7 +42,7 @@ python .\cli.py goofish-create --start
 只同步某个任务：
 
 ```powershell
-python .\cli.py goofish-create --task "AI工具与智能体热点" --start
+python .\cli.py goofish-create --task "AI数字产品核心热点" --start
 ```
 
 默认 API 地址是 `https://goofish.xiaolicloud.cn:18443`，也可以通过 `.env` 中的 `GOOFISH_API_BASE_URL` 覆盖。当前接口按你贴出的说明没有额外 Token 校验；如果你在反向代理前加了鉴权，可填写 `GOOFISH_API_TOKEN`。不要把没有鉴权的管理接口直接暴露到公网。
@@ -100,4 +100,4 @@ docker compose logs -f pipeline
 docker compose down
 ```
 
-`goofish-bootstrap` 默认会创建不存在的任务并启动新任务；重复执行会按任务名跳过已有任务。若只想查看提交内容，可在宿主机执行 `python .\cli.py goofish-create --dry-run`，避免误调用远端 API。
+`goofish-bootstrap` 默认会创建不存在的任务并启动新任务；重复执行会按任务名跳过已有任务。若只想查看提交内容，可在宿主机执行 `python .\cli.py goofish-create --dry-run`，避免误调用远端 API。远端已经存在的旧重复任务不会被自动删除或停止，需要在 Web 控制台或闲鱼监控后台里手动处理。

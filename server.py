@@ -14,10 +14,10 @@ try:
         create_from_specs,
         load_specs,
     )
-    from .pipeline import OUTPUT_DIR, load_tasks, run_named_task
+    from .pipeline import OUTPUT_DIR, load_tasks, run_named_task, template_copy
 except ImportError:  # direct invocation from the project root
     from goofish_tasks import DEFAULT_BASE_URL, GoofishAPIError, GoofishClient, create_from_specs, load_specs
-    from pipeline import OUTPUT_DIR, load_tasks, run_named_task
+    from pipeline import OUTPUT_DIR, load_tasks, run_named_task, template_copy
 
 
 HTML = """<!doctype html>
@@ -41,8 +41,10 @@ button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;align-items:cen
 .status{min-height:22px;color:var(--muted)}.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #eef1f5;padding:10px 8px;vertical-align:top}th{color:var(--muted);font-weight:600}
 pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;max-height:360px;overflow:auto}
-a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;background:#eef2ff;color:#3730a3;font-size:12px}
-iframe{width:100%;height:520px;border:1px solid var(--line);border-radius:8px;background:white}
+a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;background:#eef2ff;color:#3730a3;font-size:12px}.pill.ok{background:#ecfdf5;color:#166534}.pill.warn{background:#fff7ed;color:#9a3412}
+.help{background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;padding:12px;color:#475569;line-height:1.7}
+.copy-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.cover-preview{max-width:360px;width:100%;border:1px solid var(--line);border-radius:8px;margin-top:8px;background:white}
+.image-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:12px 0}.tiny{font-size:12px;color:var(--muted)}
 @media (max-width:1000px){.grid,.cards{grid-template-columns:1fr}header{display:block}main,header{padding-left:16px;padding-right:16px}}
 </style>
 </head>
@@ -53,8 +55,9 @@ iframe{width:100%;height:520px;border:1px solid var(--line);border-radius:8px;ba
     <p class="muted">本地资源任务、闲鱼热点监控、文案结果集中管理。</p>
   </div>
   <div class="row">
-    <a id="goofishOpen" target="_blank" rel="noreferrer"><button class="secondary">打开闲鱼后台</button></a>
-    <button class="secondary" onclick="refreshAll()">刷新</button>
+    <button class="secondary" id="openTasksBtn">新标签打开任务管理</button>
+    <button class="secondary" id="openResultsBtn">新标签打开监控结果</button>
+    <button class="secondary" id="refreshBtn">刷新</button>
   </div>
 </header>
 <main>
@@ -71,8 +74,9 @@ iframe{width:100%;height:520px;border:1px solid var(--line);border-radius:8px;ba
       <div class="row">
         <select id="localTask"></select>
         <label class="row"><input id="includeSeen" type="checkbox"> 包含已处理</label>
-        <button id="runBtn" onclick="runLocalTask()">运行一次</button>
+        <button id="runBtn">运行一次</button>
       </div>
+      <div class="help">这里跑的是本地资源整理流程。跑完后点“查看”，再点每条记录的“文案”，就能复制闲鱼文案和发货说明。</div>
       <div id="localStatus" class="status"></div>
       <div id="runs"></div>
     </div>
@@ -80,38 +84,30 @@ iframe{width:100%;height:520px;border:1px solid var(--line);border-radius:8px;ba
     <div class="panel stack">
       <h2>闲鱼热点监控</h2>
       <div class="row">
-        <button onclick="loadGoofishTasks()">测试连接/刷新任务</button>
-        <button class="secondary" onclick="previewBootstrap()">预览创建任务</button>
-        <button onclick="startBootstrap()">创建并启动监控</button>
+        <button id="loadGoofishBtn">测试连接/刷新任务</button>
+        <button class="secondary" id="previewBootstrapBtn">预览将同步的任务</button>
+        <button id="startBootstrapBtn">同步缺失任务并启动</button>
       </div>
+      <div class="help">当前配置只保留 2 个监控：1 个关键词低成本任务 + 1 个 AI 文本判断任务。配置已关闭图片分析（analyze_images=false），cron 为 `0 */12 * * *`，表示每 12 小时一次。“已启用”表示会按“下次运行”时间自动采集；如果出现同名重复，说明远程已经有多条旧任务，建议只保留一条。</div>
       <div id="goofishStatus" class="status"></div>
       <div id="goofishTasks"></div>
     </div>
   </section>
 
-  <section class="grid">
-    <div class="panel">
-      <h2>结果详情</h2>
-      <div id="runDetail" class="muted">点击最近运行里的记录查看生成条目。</div>
-      <div id="itemDetail"></div>
-    </div>
-    <div class="panel">
-      <h2>闲鱼原始后台</h2>
-      <p class="muted">如果下方无法显示，说明远程页面禁止 iframe 嵌入，点右上角“打开闲鱼后台”。</p>
-      <iframe id="goofishFrame"></iframe>
-    </div>
+  <section class="panel">
+    <h2>结果详情</h2>
+    <div id="runDetail" class="muted">点击最近运行里的“查看”查看生成条目。</div>
+    <div id="itemDetail"></div>
   </section>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let lastRuns = [];
+let goofishUrls = {tasks_url:'https://goofish.xiaolicloud.cn:18443/tasks?create=1', results_url:'https://goofish.xiaolicloud.cn:18443/results'};
+let currentItem = null;
 
 function esc(value){
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-}
-function arg(value){
-  return esc(JSON.stringify(String(value ?? '')));
 }
 async function api(path, options={}){
   const response = await fetch(path, options);
@@ -124,11 +120,55 @@ async function api(path, options={}){
 function setStatus(id, text, cls=''){
   const el=$(id); el.className = 'status ' + cls; el.textContent = text;
 }
+function openUrl(url){
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+async function copyText(value, label){
+  const text = String(value || '');
+  if(!text.trim()){
+    setStatus('localStatus', `${label}为空，没东西可复制`, 'warn');
+    return;
+  }
+  try{
+    await navigator.clipboard.writeText(text);
+  }catch(e){
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+  setStatus('localStatus', `${label}已复制`, 'ok');
+}
+function taskState(task){
+  const enabled = Boolean(task.enabled);
+  const running = Boolean(task.is_running);
+  if(enabled && running) return '<span class="pill ok">运行中</span>';
+  if(enabled) return '<span class="pill warn">已启用</span>';
+  return '<span class="pill">已停止</span>';
+}
+function imageAnalysisState(task){
+  return task.analyze_images
+    ? '<span class="pill warn">图片分析开</span>'
+    : '<span class="pill ok">只看文本</span>';
+}
+function summarizeBootstrapResult(data){
+  const list = Array.isArray(data) ? data : [];
+  return {
+    total: list.length,
+    created: list.filter(item => String(item.status || '').startsWith('created')).length,
+    skipped: list.filter(item => item.status === 'skipped_existing').length,
+    dryRun: list.filter(item => item.status === 'dry_run').length,
+    failed: list.filter(item => String(item.status || '').includes('failed')).length,
+  };
+}
 
 async function loadConfig(){
   const cfg = await api('/api/goofish/config');
-  $('goofishOpen').href = cfg.page_url;
-  $('goofishFrame').src = cfg.page_url;
+  goofishUrls = cfg;
 }
 async function loadHealth(){
   try { await api('/api/health'); $('healthText').textContent='正常'; $('healthText').className='ok'; }
@@ -139,11 +179,11 @@ async function loadLocalTasks(){
   $('localTask').innerHTML = tasks.map(t => `<option>${esc(t.name)}</option>`).join('');
 }
 async function loadRuns(){
-  lastRuns = await api('/api/local/runs');
-  $('latestRunText').textContent = lastRuns[0]?.run_id || '暂无';
-  if(!lastRuns.length){ $('runs').innerHTML = '<p class="muted">还没有运行记录。</p>'; return; }
+  const runs = await api('/api/local/runs');
+  $('latestRunText').textContent = runs[0]?.run_id || '暂无';
+  if(!runs.length){ $('runs').innerHTML = '<p class="muted">还没有运行记录。</p>'; return; }
   $('runs').innerHTML = '<h3>最近运行</h3><table><thead><tr><th>时间</th><th>任务</th><th>数量</th><th></th></tr></thead><tbody>' +
-    lastRuns.map(r => `<tr><td>${esc(r.run_id)}</td><td>${esc(r.task_name)}</td><td>${esc(r.count)}</td><td><button class="secondary" onclick="showRun(${arg(r.run_id)})">查看</button></td></tr>`).join('') +
+    runs.map(r => `<tr><td>${esc(r.run_id)}</td><td>${esc(r.task_name)}</td><td>${esc(r.count)}</td><td><button class="secondary js-show-run" data-run-id="${esc(r.run_id)}">查看</button></td></tr>`).join('') +
     '</tbody></table>';
 }
 async function runLocalTask(){
@@ -158,14 +198,21 @@ async function runLocalTask(){
 }
 async function showRun(runId){
   const data = await api(`/api/local/runs/${encodeURIComponent(runId)}`);
-  const rows = (data.items || []).map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.hotness_score)}</td><td><a target="_blank" href="${esc(item.page_url)}">来源</a></td><td><button class="secondary" onclick="showItem(${arg(item.folder)})">文案</button></td></tr>`).join('');
+  const rows = (data.items || []).map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.hotness_score)}</td><td><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">来源</a></td><td><button class="secondary js-show-item" data-folder="${esc(item.folder)}">文案</button></td></tr>`).join('');
   $('runDetail').innerHTML = `<p><span class="pill">${esc(data.task_name)}</span> ${esc(data.count)} 条</p>` +
     `<table><thead><tr><th>标题</th><th>热度</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   $('itemDetail').innerHTML = '';
 }
 async function showItem(folder){
   const data = await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
-  $('itemDetail').innerHTML = `<h3>闲鱼文案 copy.md</h3><pre>${esc(data.copy)}</pre><h3>发货信息 delivery.md</h3><pre>${esc(data.delivery)}</pre>`;
+  currentItem = data;
+  const copyText = data.copy_suggested || data.copy;
+  const imageHtml = data.cover_url
+    ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">公开封面仅供人工核验。正式上架建议使用你自己有权使用的封面图、目录长图或重新制作说明图。</p><p><a target="_blank" rel="noreferrer" href="${esc(data.cover_url)}">${esc(data.cover_url)}</a></p><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览"></div>`
+    : `<div class="image-box"><h3>图片信息</h3><p class="muted">这个条目没有公开封面地址。正式上架时建议补一张自有/授权封面图或目录图。</p></div>`;
+  $('itemDetail').innerHTML = imageHtml +
+    `<h3>新版闲鱼文案</h3><div class="copy-actions"><button class="secondary js-copy-field" data-field="copy_suggested">复制文案</button><button class="secondary js-copy-field" data-field="cover_url">复制图片链接</button></div><pre>${esc(copyText)}</pre>` +
+    `<h3>发货信息 delivery.md</h3><div class="copy-actions"><button class="secondary js-copy-field" data-field="delivery">复制发货信息</button></div><pre>${esc(data.delivery)}</pre>`;
 }
 
 async function loadGoofishTasks(){
@@ -174,38 +221,60 @@ async function loadGoofishTasks(){
     const tasks = await api('/api/goofish/tasks');
     $('goofishHealthText').textContent='正常'; $('goofishHealthText').className='ok';
     $('remoteCountText').textContent=String(tasks.length);
-    if(!tasks.length){ $('goofishTasks').innerHTML='<p class="muted">远程暂无任务。</p>'; return; }
-    $('goofishTasks').innerHTML = '<h3>远程任务</h3><table><thead><tr><th>ID</th><th>任务名</th><th>状态</th><th></th></tr></thead><tbody>' +
+    if(!tasks.length){ $('goofishTasks').innerHTML='<p class="muted">远程暂无任务。</p>'; setStatus('goofishStatus','连接成功，但没有任务','warn'); return; }
+    const seen = {};
+    const duplicateNames = new Set();
+    tasks.forEach(t => {
+      const name = t.task_name ?? t.name ?? t.title ?? '';
+      seen[name] = (seen[name] || 0) + 1;
+      if(seen[name] > 1) duplicateNames.add(name);
+    });
+    Object.keys(seen).forEach(name => seen[name] = 0);
+    $('goofishTasks').innerHTML = '<h3>远程任务</h3><table><thead><tr><th>ID</th><th>任务</th><th>关键词</th><th>状态</th><th>图片分析</th><th>计划</th><th>操作</th></tr></thead><tbody>' +
       tasks.map(t => {
         const id = t.id ?? t.task_id ?? t.taskId ?? '';
         const name = t.task_name ?? t.name ?? t.title ?? '';
-        const status = t.status ?? t.state ?? '';
-        const action = id ? `<button class="secondary" onclick="startRemoteTask(${arg(id)})">启动</button>` : '';
-        return `<tr><td>${esc(id)}</td><td>${esc(name)}</td><td>${esc(status)}</td><td>${action}</td></tr>`;
+        seen[name] = (seen[name] || 0) + 1;
+        const duplicate = seen[name] > 1 ? ' <span class="pill warn">同名重复</span>' : '';
+        const next = t.next_run_at ? `<br><small>下次：${esc(t.next_run_at)}</small>` : '';
+        const mode = t.decision_mode ? `<br><small>${esc(t.decision_mode)}</small>` : '';
+        const startStop = t.is_running
+          ? `<button class="danger js-stop-remote" data-task-id="${esc(id)}">停止</button>`
+          : `<button class="secondary js-start-remote" data-task-id="${esc(id)}">启动</button>`;
+        return `<tr><td>${esc(id)}</td><td>${esc(name)}${duplicate}${mode}</td><td>${esc(t.keyword || '')}</td><td>${taskState(t)}</td><td>${imageAnalysisState(t)}</td><td>${esc(t.cron || '')}${next}</td><td class="row">${startStop}<button class="secondary js-open-results">看结果</button></td></tr>`;
       }).join('') + '</tbody></table>';
-    setStatus('goofishStatus','连接成功','ok');
+    const duplicateText = duplicateNames.size ? `发现 ${duplicateNames.size} 组同名重复任务；建议停止多余的，只保留一条。` : '没有发现同名重复任务。';
+    setStatus('goofishStatus',`连接成功。${duplicateText} 运行中的任务会按“下次”时间采集，结果在闲鱼后台结果页查看。`,'ok');
   }catch(e){
     $('goofishHealthText').textContent='异常'; $('goofishHealthText').className='bad';
     setStatus('goofishStatus', e.message, 'bad');
   }
 }
 async function previewBootstrap(){
+  const btn = $('previewBootstrapBtn');
+  btn.disabled = true;
   setStatus('goofishStatus','正在生成预览...');
   try{
     const data = await api('/api/goofish/bootstrap/dry-run',{method:'POST'});
-    $('goofishTasks').innerHTML = '<h3>将创建的任务</h3><pre>'+esc(JSON.stringify(data,null,2))+'</pre>';
-    setStatus('goofishStatus',`预览完成：${data.length} 个任务`,'ok');
+    const summary = summarizeBootstrapResult(data);
+    $('goofishTasks').innerHTML = '<h3>将同步的任务</h3><pre>'+esc(JSON.stringify(data,null,2))+'</pre>';
+    setStatus('goofishStatus',`预览完成：配置里 ${summary.total} 个任务。这里只是预览，没有调用远程创建。`,'ok');
   }catch(e){ setStatus('goofishStatus', e.message, 'bad'); }
+  finally{ btn.disabled = false; }
 }
 async function startBootstrap(){
-  if(!confirm('确认创建并启动 goofish_tasks.json 里的热点监控任务？')) return;
-  setStatus('goofishStatus','正在创建并启动，AI 任务可能需要等待一会儿...');
+  if(!confirm('确认同步 goofish_tasks.json 里的 2 个热点监控任务？已存在同名任务会跳过，只创建缺失任务。')) return;
+  const btn = $('startBootstrapBtn');
+  btn.disabled = true;
+  setStatus('goofishStatus','正在同步缺失任务并启动新任务。当前配置只看文本，不分析图片...');
   try{
     const data = await api('/api/goofish/bootstrap/start',{method:'POST'});
+    const summary = summarizeBootstrapResult(data);
     $('goofishTasks').innerHTML = '<h3>执行结果</h3><pre>'+esc(JSON.stringify(data,null,2))+'</pre>';
-    setStatus('goofishStatus','创建/启动完成','ok');
+    setStatus('goofishStatus',`同步完成：新建 ${summary.created} 个，跳过已存在 ${summary.skipped} 个。新任务已按文本分析、每 12 小时一次配置。`,'ok');
     await loadGoofishTasks();
   }catch(e){ setStatus('goofishStatus', e.message, 'bad'); }
+  finally{ btn.disabled = false; }
 }
 async function startRemoteTask(taskId){
   setStatus('goofishStatus',`正在启动任务 ${taskId}...`);
@@ -215,9 +284,35 @@ async function startRemoteTask(taskId){
     await loadGoofishTasks();
   }catch(e){ setStatus('goofishStatus', e.message, 'bad'); }
 }
+async function stopRemoteTask(taskId){
+  setStatus('goofishStatus',`正在停止任务 ${taskId}...`);
+  try{
+    await api('/api/goofish/tasks/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:taskId})});
+    setStatus('goofishStatus',`任务 ${taskId} 已停止`,'ok');
+    await loadGoofishTasks();
+  }catch(e){ setStatus('goofishStatus', e.message, 'bad'); }
+}
 async function refreshAll(){
   await Promise.allSettled([loadHealth(), loadConfig(), loadLocalTasks(), loadRuns(), loadGoofishTasks()]);
 }
+
+document.addEventListener('click', (event) => {
+  const target = event.target.closest('button');
+  if(!target) return;
+  if(target.id === 'refreshBtn') refreshAll();
+  else if(target.id === 'runBtn') runLocalTask();
+  else if(target.id === 'loadGoofishBtn') loadGoofishTasks();
+  else if(target.id === 'previewBootstrapBtn') previewBootstrap();
+  else if(target.id === 'startBootstrapBtn') startBootstrap();
+  else if(target.id === 'openTasksBtn') openUrl(goofishUrls.tasks_url);
+  else if(target.id === 'openResultsBtn' || target.classList.contains('js-open-results')) openUrl(goofishUrls.results_url);
+  else if(target.classList.contains('js-show-run')) showRun(target.dataset.runId);
+  else if(target.classList.contains('js-show-item')) showItem(target.dataset.folder);
+  else if(target.classList.contains('js-copy-field')) copyText(currentItem?.[target.dataset.field], target.textContent.trim());
+  else if(target.classList.contains('js-start-remote')) startRemoteTask(target.dataset.taskId);
+  else if(target.classList.contains('js-stop-remote')) stopRemoteTask(target.dataset.taskId);
+});
+window.addEventListener('error', (event) => setStatus('localStatus', `页面脚本错误：${event.message}`, 'bad'));
 refreshAll();
 </script>
 </body>
@@ -252,11 +347,19 @@ def _read_output_item(folder: str) -> dict[str, object]:
     copy_path = item_dir / "copy.md"
     delivery_path = item_dir / "delivery.md"
     item_path = item_dir / "item.json"
+    item = json.loads(item_path.read_text(encoding="utf-8")) if item_path.exists() else {}
+    rights_confirmed = item.get("rights_review") == "confirmed"
+    copy_suggested = template_copy(item, {"rights_confirmed": rights_confirmed}) if item else ""
     return {
         "folder": folder,
         "copy": copy_path.read_text(encoding="utf-8") if copy_path.exists() else "",
+        "copy_suggested": copy_suggested,
         "delivery": delivery_path.read_text(encoding="utf-8") if delivery_path.exists() else "",
-        "item": json.loads(item_path.read_text(encoding="utf-8")) if item_path.exists() else {},
+        "cover_url": item.get("cover_url", ""),
+        "cover_local_path": item.get("cover_local_path", ""),
+        "page_url": item.get("page_url", ""),
+        "title": item.get("title", ""),
+        "item": item,
     }
 
 
@@ -311,7 +414,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, _read_output_item(folder))
             elif path == "/api/goofish/config":
                 base_url = _goofish_base_url()
-                self._send(200, {"base_url": base_url, "page_url": f"{base_url}/tasks?create=1"})
+                self._send(
+                    200,
+                    {
+                        "base_url": base_url,
+                        "tasks_url": f"{base_url}/tasks?create=1",
+                        "results_url": f"{base_url}/results",
+                    },
+                )
             elif path == "/api/goofish/tasks":
                 self._send(200, _goofish_client().list_tasks())
             elif path == "/api/goofish/specs":
@@ -342,6 +452,11 @@ class Handler(BaseHTTPRequestHandler):
                 if task_id in {None, ""}:
                     raise ValueError("缺少 task_id")
                 self._send(200, _goofish_client().start(task_id))
+            elif path == "/api/goofish/tasks/stop":
+                task_id = body.get("task_id")
+                if task_id in {None, ""}:
+                    raise ValueError("缺少 task_id")
+                self._send(200, _goofish_client().stop(task_id))
             else:
                 self._send(404, {"error": "not found"})
         except (KeyError, OSError, ValueError, GoofishAPIError, json.JSONDecodeError) as exc:

@@ -289,25 +289,55 @@ def download_authorized_cover(item: Dict[str, Any], task: Dict[str, Any], asset_
     return str(path.relative_to(asset_dir.parent.parent)).replace("\\", "/")
 
 
+def _copy_tags(item: Dict[str, Any]) -> str:
+    values = item.get("matched_keywords") or item.get("categories") or ["数字资料"]
+    tags = []
+    for value in values:
+        tag = re.sub(r"\s+", "", str(value).strip())
+        if tag and tag not in tags:
+            tags.append(tag)
+    return " ".join(f"#{tag}" for tag in tags[:8])
+
+
+def _summary_bullets(summary: str, *, limit: int = 4) -> List[str]:
+    parts = [part.strip(" ，。；;、") for part in re.split(r"[。；;]\s*", summary or "") if part.strip()]
+    if not parts:
+        return ["以实际审核通过的内容清单为准，适合先了解主题框架再系统学习。"]
+    return parts[:limit]
+
+
 def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
     title = item["title"]
-    categories = "、".join(item.get("categories") or ["数字资料"])
+    categories = item.get("categories") or ["数字资料"]
+    category_text = "、".join(categories)
     summary = item.get("summary") or "以页面公开信息为准，具体目录请以交付前确认内容为准。"
+    bullets = _summary_bullets(summary)
+    topic = categories[0] if categories else "数字资料"
+    tags = _copy_tags(item)
+    audit_prefix = ""
     if not task.get("rights_confirmed"):
-        return (
-            f"【内部审核草稿｜暂勿发布】{title}\n\n"
-            "这是一份根据公开元数据生成的选品草稿。当前未完成内容权利确认，禁止发布、售卖或交付。\n\n"
-            f"主题：{categories}\n"
-            f"公开简介：{summary}\n\n"
-            "审核通过后再补充：自有/已授权内容清单、百度网盘交付链接、售后规则和最终价格。"
-        )
+        audit_prefix = "【内部审核草稿｜暂勿发布】\n当前未完成内容权利确认，禁止发布、售卖或交付。审核通过后再改成正式上架文案。\n\n"
+
     return (
-        f"【{categories}】{title}\n\n"
-        "适合想系统学习、快速上手相关主题的朋友。内容以实际授权清单为准，购买前可先咨询目录和适用人群。\n\n"
-        f"亮点：{summary}\n\n"
-        "交付方式：拍下后发送我方自有/已获授权的百度网盘链接及使用说明。\n"
-        "温馨提示：数字资料非实物，发货前请确认设备、格式与学习需求；具体售后按页面说明执行。\n\n"
-        "关键词：" + "、".join(item.get("matched_keywords") or item.get("categories") or ["数字资料"])
+        audit_prefix
+        + f"{title}\n"
+        + f"{tags}\n\n"
+        + "【核心价值】\n"
+        + f"围绕 {topic} 的系统学习/资料整理方向，适合想快速判断内容价值、补齐知识框架的人。购买前建议先确认目录、格式和交付清单。\n\n"
+        + "【内容聚焦】\n"
+        + "\n".join(f"- {line}" for line in bullets)
+        + "\n\n【适合人群】\n"
+        + f"- 想系统了解 {topic}，但不想零散搜索资料的人\n"
+        + "- 需要按目录学习、复盘或做项目参考的人\n"
+        + "- 想先看清内容范围，再决定是否深入学习的人\n\n"
+        + "【资料优势】\n"
+        + "- 主题明确，适合做学习路线或选品需求判断\n"
+        + "- 支持先确认目录/格式/适用人群，再决定是否拍下\n"
+        + "- 如用于正式发布，请只交付自有或已授权的网盘内容\n\n"
+        + "【关键信息】\n"
+        + f"主题分类：{category_text}\n"
+        + "交付方式：审核通过后填写你自己的授权百度网盘链接\n"
+        + "温馨提示：数字资料非实物，拍下前请确认内容清单、文件格式和售后规则。"
     )
 
 
@@ -411,8 +441,9 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             f"状态：{'可进入授权审核后的发布流程' if task.get('rights_confirmed') else '未确认分发权，禁止发布'}\n"
             "百度网盘交付链接：\n"
             + ("\n".join(f"- {link}" for link in item["delivery_links"]) if item["delivery_links"] else "- 待填入你自己的授权网盘链接")
-            + "\n\n封面：\n"
+            + "\n\n图片信息：\n"
             + (f"- 本地：{item['cover_local_path']}" if item.get("cover_local_path") else f"- 公开封面地址（仅供人工核验）：{item.get('cover_url') or '无'}")
+            + "\n- 上架建议：使用你自己有权使用的封面图、课程目录长图或重新制作的说明图；公开来源图不要直接当作可商用素材。"
             + "\n\n原始页面（仅作来源核验）：\n- "
             + str(item.get("page_url") or "")
             + "\n"
