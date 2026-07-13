@@ -10,6 +10,7 @@ class FakeClient:
     def __init__(self, existing=None):
         self.existing = existing or []
         self.generated = []
+        self.updated = []
         self.started = []
         self.job_reads = 0
 
@@ -21,6 +22,10 @@ class FakeClient:
         if payload["decision_mode"] == "ai":
             return {"job": {"job_id": "job-1"}}
         return {"task": {"id": 20}}
+
+    def update(self, task_id, payload):
+        self.updated.append((task_id, payload))
+        return {"task": {"id": task_id, **payload}}
 
     def generation_job(self, job_id):
         self.job_reads += 1
@@ -52,11 +57,20 @@ class GoofishTaskTests(unittest.TestCase):
         self.assertEqual(client.started, [10])
         self.assertEqual(client.generated[0]["analyze_images"], True)
 
-    def test_existing_task_is_skipped(self):
+    def test_existing_task_is_updated(self):
         client = FakeClient(existing=[{"id": 99, "name": "AI"}])
         specs = [{"task_name": "AI", "keyword": "AI", "decision_mode": "keyword"}]
         result = create_from_specs(client, specs, start_created=True)
+        self.assertEqual(result[0]["status"], "updated_existing")
+        self.assertEqual(client.updated[0][0], 99)
+        self.assertEqual(client.generated, [])
+
+    def test_existing_task_can_still_be_skipped(self):
+        client = FakeClient(existing=[{"id": 99, "name": "AI"}])
+        specs = [{"task_name": "AI", "keyword": "AI", "decision_mode": "keyword"}]
+        result = create_from_specs(client, specs, start_created=True, update_existing=False)
         self.assertEqual(result[0]["status"], "skipped_existing")
+        self.assertEqual(client.updated, [])
         self.assertEqual(client.generated, [])
 
 

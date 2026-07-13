@@ -17,13 +17,13 @@ python .\cli.py serve
 
 然后打开 `http://127.0.0.1:8765/`。TheItzy 的 robots.txt 声明了 10 秒 crawl-delay，所以默认每次请求间隔 10 秒；不要通过并发、代理轮换或改 User-Agent 绕过限制。
 
-本地整理任务默认只看近 15 天 TheItzy 公开元数据，并优先筛选 AI 课程、教程、资料、项目实战等虚拟产品方向；会排除远程安装配置、账号卡密、实体商品等不适合的内容。运行时还会读取闲鱼监控的 `/api/results/files` 与 `/api/results/{filename}`，把闲鱼市场结果转换成市场信号，再给 TheItzy 课程加权排序。页面“运行诊断”会显示抓取数、已发布过滤数、超过时效过滤数、排除词过滤数、关键词命中数、闲鱼市场样本数和最终输出数；容器日志也会打印每页抓取、筛选和完成状态。若输出为 0，优先看诊断里的 `zero_reason`。
+本地整理任务会读取 TheItzy 公开元数据，并优先筛选 AI 课程、教程、资料、项目实战等虚拟产品方向；本地资源池不按发布时间硬过滤，会排除远程安装配置、账号卡密、实体商品等不适合的内容。运行时还会读取闲鱼监控的 `/api/results/files` 与 `/api/results/{filename}`，把闲鱼市场结果转换成市场信号，再给 TheItzy 课程加权排序；时间限制只放在远程闲鱼热点监控任务里。页面“运行诊断”会显示抓取数、已发布过滤数、排除词过滤数、关键词命中数、闲鱼市场样本数和最终输出数；容器日志也会打印每页抓取、筛选和完成状态。若输出为 0，优先看诊断里的 `zero_reason`。
 
 每次被选中的课程都会写入 `output/selection.sqlite3`。页面结果表里可以把某个课程标记为“已发布”或“取消发布”：默认下次选品只过滤“已发布”的课程；只是被选中过但你还没发布的课程，不会被过滤，仍然可以继续参与下一轮筛选。
 
 ## 自动创建闲鱼热点监控任务
 
-`goofish_tasks.json` 是批量任务配置，现在只保留 2 个监控任务：1 个关键词快速筛选任务 + 1 个 AI 文本判断任务。两者都关闭图片分析（`analyze_images=false`），搜索词收敛为 `AI课程`，上新范围使用闲鱼监控项目支持的 `new_publish_option=14天内`，默认每 12 小时执行一次（`0 */12 * * *`）。任务口径只推荐虚拟课程/教程/资料/项目实战类商品，排除远程安装配置、账号卡密、实体商品、磨茧神器等无关内容。同步器会先调用 `GET /api/tasks` 按任务名去重；AI 任务再调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
+`goofish_tasks.json` 是批量任务配置，现在只保留 2 个监控任务：1 个关键词快速筛选任务 + 1 个 AI 文本判断任务。两者都关闭图片分析（`analyze_images=false`），搜索词使用更宽的 `AI教程`，上新范围使用闲鱼监控项目支持的 `new_publish_option=14天内`，默认每 12 小时执行一次（`0 */12 * * *`）。任务口径只推荐虚拟课程/教程/资料/项目实战类商品，关键词覆盖 AI 视频制作、AI生成视频、文生视频、图生视频、Seedance、即梦、可灵、Runway、Pika、AI漫剧、AI短剧、短剧创作、剧本创作、数字人等方向，并排除远程安装配置、账号卡密、实体商品、磨茧神器等无关内容。同步器会先调用 `GET /api/tasks` 按任务名去重；同名任务已存在时会调用 `PATCH /api/tasks/{task_id}` 更新配置，缺失任务才会创建。AI 任务创建时会调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
 
 先预览请求，不访问远端：
 
@@ -107,7 +107,7 @@ docker compose down
 日志里重点看这些字段：
 
 - `fetch_theitzy response page=... count=...`：TheItzy 每页实际返回多少条。
-- `selection_done`：抓取数、跳过数、超过时效过滤数、排除词过滤数、候选数、关键词命中数、最终输出数。
+- `selection_done`：抓取数、已发布过滤数、排除词过滤数、候选数、关键词命中数、最终输出数；只有任务显式配置 `max_age_days` 时才会出现超过时效过滤。
 - `zero_reason`：输出 0 条时的直接原因。
 
 `goofish-bootstrap` 默认会创建不存在的任务并启动新任务；重复执行会按任务名跳过已有任务。若只想查看提交内容，可在宿主机执行 `python .\cli.py goofish-create --dry-run`，避免误调用远端 API。远端已经存在的旧重复任务不会被自动删除或停止，需要在 Web 控制台或闲鱼监控后台里手动处理。

@@ -100,6 +100,9 @@ class GoofishClient:
     def generate(self, payload: Dict[str, Any]) -> Any:
         return self.request_json("POST", "/api/tasks/generate", payload)
 
+    def update(self, task_id: Any, payload: Dict[str, Any]) -> Any:
+        return self.request_json("PATCH", f"/api/tasks/{task_id}", payload)
+
     def generation_job(self, job_id: str) -> Dict[str, Any]:
         data = self.request_json("GET", f"/api/tasks/generate-jobs/{job_id}")
         if isinstance(data, dict) and isinstance(data.get("job"), dict):
@@ -241,6 +244,7 @@ def create_from_specs(
     selected_names: Optional[Iterable[str]] = None,
     start_created: bool = False,
     skip_existing: bool = True,
+    update_existing: bool = True,
     start_existing: bool = False,
     dry_run: bool = False,
 ) -> List[Dict[str, Any]]:
@@ -263,6 +267,21 @@ def create_from_specs(
         old = existing_by_name.get(name)
         if old and skip_existing:
             task_id = _find_task_id(old)
+            if update_existing and task_id is not None and not dry_run:
+                update_response = client.update(task_id, payload)
+                result = {
+                    "task_name": name,
+                    "status": "updated_existing",
+                    "task_id": task_id,
+                    "update_response": update_response,
+                }
+                if start_existing:
+                    result["start_response"] = client.start(task_id)
+                    result["status"] = "updated_existing_started"
+                results.append(result)
+                print(f"更新已存在任务：{name} task_id={task_id}")
+                continue
+
             result: Dict[str, Any] = {"task_name": name, "status": "skipped_existing", "task_id": task_id}
             if start_existing and task_id is not None and not dry_run:
                 result["start_response"] = client.start(task_id)
@@ -308,6 +327,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-wait-seconds", type=int, default=int(os.getenv("GOOFISH_MAX_WAIT_SECONDS", "1800")))
     parser.add_argument("--start", action="store_true", help="创建成功后立即启动新任务")
     parser.add_argument("--start-existing", action="store_true", help="已存在的任务也调用启动接口")
+    parser.add_argument("--no-update-existing", action="store_true", help="同名任务已存在时不更新配置，只跳过")
     parser.add_argument("--no-skip-existing", action="store_true", help="允许创建同名任务；通常不建议使用")
     parser.add_argument("--dry-run", action="store_true", help="只打印将提交的 JSON，不请求远端 API")
     return parser
@@ -331,6 +351,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             start_created=args.start,
             start_existing=args.start_existing,
             skip_existing=not args.no_skip_existing,
+            update_existing=not args.no_update_existing,
             dry_run=args.dry_run,
         )
         print(_json_text(results))
