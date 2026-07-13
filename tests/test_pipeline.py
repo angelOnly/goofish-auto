@@ -26,6 +26,18 @@ validate_member_cookie = pipeline.validate_member_cookie
 
 
 class PipelineTests(unittest.TestCase):
+    def setUp(self):
+        self._patchers = [
+            patch.object(pipeline, "ai_copy_configured", return_value=False),
+            patch.object(pipeline, "maybe_ai_copy", return_value=""),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in reversed(self._patchers):
+            patcher.stop()
+
     def test_strip_html_and_metric(self):
         self.assertEqual(strip_html("<p>Hello <b>world</b></p>"), "Hello world")
         self.assertEqual(parse_metric("3.13K"), 3130)
@@ -249,6 +261,37 @@ class PipelineTests(unittest.TestCase):
                 summary = run_task(task, output_dir=output_dir)
         self.assertEqual(summary["diagnostics"]["reused_unpublished_count"], 1)
         self.assertEqual(summary["items"][0]["title"], "AI 课程旧标题")
+
+    def test_reused_unpublished_item_records_member_delivery_skip_status(self):
+        raw = [{
+            "id": "theitzy:cache-delivery",
+            "title": "AI 课程缓存发货状态",
+            "page_url": "https://theitzy.net/cache-delivery/",
+            "published_at": "2999-01-01T00:00:00+00:00",
+            "categories": ["AI"],
+            "summary": "旧摘要",
+            "cover_url": "",
+        }]
+        first_task = {"name": "缓存发货状态", "source": "theitzy", "keywords": ["AI"], "source_config": {"base_url": "https://theitzy.net"}}
+        second_task = {
+            **first_task,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_cookie_env": "THEITZY_COOKIE",
+            },
+            "rights_confirmed": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            with patch.object(pipeline, "fetch_source", return_value=raw), patch.object(pipeline, "maybe_ai_copy", return_value=""), patch.object(pipeline, "ai_copy_configured", return_value=False):
+                run_task(first_task, output_dir=output_dir)
+            with patch.object(pipeline, "fetch_source", return_value=raw), patch.object(pipeline, "validate_member_cookie", return_value={}), patch.object(pipeline, "maybe_ai_copy", return_value=""), patch.object(pipeline, "ai_copy_configured", return_value=False):
+                summary = run_task(second_task, output_dir=output_dir)
+            self.assertEqual(summary["diagnostics"]["reused_unpublished_count"], 1)
+            item_path = output_dir / summary["items"][0]["folder"] / "item.json"
+            item = json.loads(item_path.read_text(encoding="utf-8"))
+            self.assertEqual(item["member_delivery"]["status"], "skipped_rights_unconfirmed")
 
     def test_run_filters_old_and_excluded_items(self):
         raw = [

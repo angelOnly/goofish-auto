@@ -99,7 +99,7 @@
     },
     "output_limit": 20,
     "reuse_unpublished_selections": true,
-    "rights_confirmed": false,
+    "rights_confirmed": true,
     "authorized_assets": false,
     "owned_delivery_links": []
   }

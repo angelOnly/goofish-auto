@@ -1359,12 +1359,14 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     selection_statuses = get_selection_statuses(item_ids, db_path)
     reuse_unpublished = bool(task.get("reuse_unpublished_selections", True))
     cached_items = get_cached_unpublished_items(item_ids, db_path) if reuse_unpublished else {}
+    source_config = task.get("source_config") or {}
     member_delivery_last_request: List[float] = []
     enriched_items: List[Dict[str, Any]] = []
 
     for item in items:
         course_id = str(item.get("id") or "")
         cached = cached_items.get(course_id)
+        member_delivery_checked = False
         if cached and should_reuse_cached_item(cached, task):
             item = _merge_cached_item(cached, item)
         else:
@@ -1373,11 +1375,18 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
             item["delivery_links"] = list(task.get("owned_delivery_links", []))
             member_delivery = fetch_member_delivery(item, task, member_delivery_last_request)
+            member_delivery_checked = True
             if member_delivery is not None:
                 item["member_delivery"] = member_delivery
             ai_copy = maybe_ai_copy(item, task)
             item["copy"] = ai_copy or template_copy(item, task)
             item["copy_source"] = "ai" if ai_copy else "template"
+        item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
+        item["delivery_links"] = list(task.get("owned_delivery_links", []))
+        if source_config.get("fetch_member_delivery") and not member_delivery_checked and not isinstance(item.get("member_delivery"), dict):
+            member_delivery = fetch_member_delivery(item, task, member_delivery_last_request)
+            if member_delivery is not None:
+                item["member_delivery"] = member_delivery
         item["selection_status"] = selection_statuses.get(course_id, item.get("selection_status") or {"published": False})
         enriched_items.append(item)
     items = enriched_items

@@ -69,7 +69,8 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
 .image-preview-row{display:flex;align-items:flex-start;gap:12px;margin:10px 0;flex-wrap:wrap}.thumb-link{display:inline-block;border:1px solid var(--line);border-radius:8px;background:white;padding:4px}.thumb-link img{display:block;width:120px;max-height:120px;object-fit:cover;border-radius:5px}
 .inline-detail-row td{background:#fbfdff;padding:0 8px 12px}.inline-copy-panel{border:1px solid #dbe5f0;border-radius:8px;padding:10px 12px;margin:4px 0 8px;background:white}
 .inline-copy-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.inline-copy-head h3{margin:0;font-size:14px}.inline-copy-actions{display:flex;gap:6px;flex-wrap:wrap}
-.copy-preview{white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.65;color:#24324a;background:#f8fafc;border:1px solid #edf2f7;border-radius:7px;padding:8px;margin:0}
+.copy-preview{white-space:pre-wrap;word-break:break-word;line-height:1.65;color:#24324a;background:#f8fafc;border:1px solid #edf2f7;border-radius:7px;padding:10px;margin:10px 0 0;max-height:none;overflow:visible}
+.market-compact{margin-top:10px}.peer-links{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px}.peer-links a{display:inline-flex;align-items:center;border:1px solid #cbd5e1;border-radius:7px;padding:2px 7px;background:white;font-size:12px;max-width:5.5em;overflow:hidden;white-space:nowrap}
 .publish-cell{min-width:110px}.publish-cell small{display:block;color:var(--muted);margin-top:4px}
 @media (max-width:1000px){.grid,.cards{grid-template-columns:1fr}header{display:block}main,header{padding-left:16px;padding-right:16px}}
 </style>
@@ -242,6 +243,10 @@ function money(value){
   if(!Number.isFinite(number)) return '';
   return (Math.round(number * 100) / 100).toFixed(2).replace(/[.]?0+$/,'');
 }
+function shortText(value, max=5){
+  const chars = Array.from(String(value || '').trim());
+  return chars.slice(0, max).join('') || '样本';
+}
 function marketPriceText(item, fallback='暂无价格样本'){
   const median = item?.market_median_price;
   if(!hasPrice(median)) return fallback;
@@ -355,19 +360,19 @@ async function showItem(folder){
         </div>`
       : `<p class="tiny">这个条目没有公开图片。</p>`;
     const marketTerms = (data.item?.market_matched_terms || []).slice(0, 8).join(', ');
-    const marketRefs = (data.item?.market_reference_titles || []).slice(0, 5).map(ref => {
+    const marketRefs = (data.item?.market_reference_titles || []).slice(0, 5).map((ref, index) => {
       const price = ref.price ? ` <small>¥${esc(ref.price)}</small>` : '';
-      const stats = [ref.wants ? `${esc(ref.wants)}想要` : '', ref.views ? `${esc(ref.views)}浏览` : ''].filter(Boolean).join(' / ');
-      const statsText = stats ? ` <small>${stats}</small>` : '';
-      const title = esc(ref.title || '同行商品');
+      const fullTitle = String(ref.title || `同行${index + 1}`);
+      const label = shortText(fullTitle, 5);
+      const tooltip = [fullTitle, ref.price ? `¥${ref.price}` : '', ref.wants ? `${ref.wants}想要` : '', ref.views ? `${ref.views}浏览` : ''].filter(Boolean).join(' / ');
       return ref.link
-        ? `<li><a href="${esc(ref.link)}" target="_blank" rel="noreferrer">${title}</a>${price}${statsText}</li>`
-        : `<li>${title}${price}${statsText}</li>`;
+        ? `<span><a href="${esc(ref.link)}" target="_blank" rel="noreferrer" title="${esc(tooltip)}">${esc(label)}</a>${price}</span>`
+        : `<span title="${esc(tooltip)}">${esc(label)}${price}</span>`;
     }).join('');
     const priceText = marketPriceText(data.item);
     const marketHtml = marketTerms
-      ? `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">闲鱼匹配：${esc(marketTerms)}</p>${marketRefs ? `<p class="tiny">同行样本：</p><ul class="tiny">${marketRefs}</ul>` : ''}`
-      : `<p class="tiny">同行参考价：${esc(priceText)}</p><p class="tiny">暂无闲鱼市场匹配。</p>`;
+      ? `<div class="market-compact tiny"><p>同行参考价：${esc(priceText)}；匹配：${esc(marketTerms)}</p>${marketRefs ? `<div class="peer-links" aria-label="同行样本">${marketRefs}</div>` : ''}</div>`
+      : `<div class="market-compact tiny"><p>同行参考价：${esc(priceText)}；暂无闲鱼市场匹配。</p></div>`;
     const deliveryStateHtml = data.delivery_payload
       ? `<p class="tiny ok">发货链接：${esc(data.delivery_status_text || '已获取')}</p>`
       : `<p class="tiny warn">发货链接：${esc(data.delivery_status_text || '未获取')}</p>`;
@@ -385,11 +390,11 @@ async function showItem(folder){
             <button class="secondary mini js-show-full" data-folder="${esc(folder)}">看完整</button>
           </div>
         </div>
-        ${marketHtml}
         ${deliveryStateHtml}
+        <pre class="copy-preview">${esc(copyText)}</pre>
         ${sourceHtml}
         ${imagePreview}
-        <p class="copy-preview">${esc(copyText)}</p>
+        ${marketHtml}
       </div>`;
   }
 }
@@ -579,7 +584,7 @@ def _delivery_payload(item: dict[str, object]) -> tuple[str, str]:
     status = str(member_delivery.get("status") or "")
     message = str(member_delivery.get("message") or "")
     if status == "skipped_rights_unconfirmed":
-        return "", "未获取：未确认分发权，程序已跳过会员网盘链接抓取"
+        return "", "未抓取：未确认分发权；如已确认合法分发，请把 tasks.json 的 rights_confirmed 改为 true 后重跑"
     if status == "missing_cookie":
         return "", f"未获取：{message or '缺少会员 Cookie'}"
     if status == "not_found":
@@ -589,7 +594,7 @@ def _delivery_payload(item: dict[str, object]) -> tuple[str, str]:
     if status == "missing_page_url":
         return "", "未获取：缺少课程页地址"
     if links and not rights_confirmed:
-        return "", "已解析到链接，但未确认分发权，复制发货已禁用"
+        return "", f"已抓到 {len(links)} 条百度网盘链接；未确认分发权，复制发货已禁用"
     return "", "未获取：没有百度网盘链接数据"
 
 
