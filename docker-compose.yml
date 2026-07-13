@@ -13,11 +13,8 @@ x-app-build: &app-build
 
     COPY . /app
 
-    RUN mkdir -p /app/output \
-        && useradd --create-home --uid 10001 appuser \
-        && chown -R appuser:appuser /app
+    RUN mkdir -p /app/output
 
-    USER appuser
     EXPOSE 8765
 
 services:
