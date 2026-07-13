@@ -23,7 +23,7 @@ python .\cli.py serve
 
 ## 自动创建闲鱼热点监控任务
 
-`goofish_tasks.json` 是批量任务配置，现在包含 4 个监控任务：新品关键词快速筛选、新品 AI 文本判断、热度关键词快速筛选、热度 AI 文本判断。四个任务都关闭图片分析（`analyze_images=false`），搜索词使用 `AI课程`；新品任务使用闲鱼监控项目支持的 `new_publish_option=14天内` 并每 12 小时执行一次（`0 */12 * * *`），热度任务不限制上新时间、翻 5 页、错开到每 12 小时第 15 分钟执行（`15 */12 * * *`）。任务口径只推荐虚拟课程/教程/资料/项目实战类商品，关键词覆盖 AI 视频制作、AI生成视频、文生视频、图生视频、Seedance、即梦、可灵、Runway、Pika、AI漫剧、AI短剧、短剧创作、剧本创作、数字人等方向，并排除远程安装配置、账号卡密、实体商品、磨茧神器等无关内容。同步器会先调用 `GET /api/tasks` 按任务名去重；同名任务已存在时会调用 `PATCH /api/tasks/{task_id}` 更新配置，缺失任务才会创建。AI 任务创建时会调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
+`goofish_tasks.json` 是批量任务配置，现在包含 5 个监控任务：新品关键词快速筛选、新品 AI 文本判断、热度关键词快速筛选、热度 AI 文本判断、高单价虚拟课程 AI 精筛。前 4 个 AI 方向任务搜索词使用 `AI课程`；高单价任务搜索词使用更宽的 `课程`，最低价 `30`，重点看软考、国考/公考、雅思/托福、考研、PMP、法考、CPA、教师资格证、建造师等客单价更高的虚拟课程。全部任务都关闭图片分析（`analyze_images=false`）。新品任务使用闲鱼监控项目支持的 `new_publish_option=14天内` 并每 12 小时执行一次（`0 */12 * * *`），热度任务不限制上新时间、翻 5 页、错开到每 12 小时第 15 分钟执行（`15 */12 * * *`），高单价任务错开到第 30 分钟执行（`30 */12 * * *`）。同步器会先调用 `GET /api/tasks` 按任务名去重；同名任务已存在时会调用 `PATCH /api/tasks/{task_id}` 更新配置，缺失任务才会创建。AI 任务创建时会调用 `POST /api/tasks/generate`、轮询 `/api/tasks/generate-jobs/{job_id}`，最后按需调用 `POST /api/tasks/start/{task_id}`。
 
 先预览请求，不访问远端：
 

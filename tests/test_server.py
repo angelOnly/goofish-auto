@@ -1,5 +1,6 @@
 import unittest
 import json
+import sqlite3
 import tempfile
 import time
 from pathlib import Path
@@ -30,6 +31,76 @@ class ServerTests(unittest.TestCase):
                 time.sleep(0.05)
         self.assertEqual(snapshot["status"], "done")
         self.assertEqual(snapshot["result"]["run_id"], "run-1")
+
+    def test_list_published_items_includes_delivery_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            db_path = output_dir / "selection.sqlite3"
+            conn = sqlite3.connect(db_path)
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE course_selections (
+                            course_id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            source TEXT,
+                            page_url TEXT,
+                            first_selected_at TEXT NOT NULL,
+                            last_selected_at TEXT NOT NULL,
+                            last_run_id TEXT,
+                            last_task_name TEXT,
+                            selection_count INTEGER NOT NULL DEFAULT 0,
+                            published INTEGER NOT NULL DEFAULT 0,
+                            published_at TEXT,
+                            updated_at TEXT NOT NULL,
+                            last_hotness_score REAL,
+                            last_market_match_score REAL,
+                            raw_json TEXT
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO course_selections (
+                            course_id, title, source, page_url, first_selected_at, last_selected_at,
+                            selection_count, published, published_at, updated_at, raw_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "theitzy:published",
+                            "AI 发布课程",
+                            "theitzy",
+                            "https://theitzy.net/published/",
+                            "2026-07-14T00:00:00+08:00",
+                            "2026-07-14T00:00:00+08:00",
+                            1,
+                            1,
+                            "2026-07-14T00:10:00+08:00",
+                            "2026-07-14T00:10:00+08:00",
+                            json.dumps(
+                                {
+                                    "id": "theitzy:published",
+                                    "title": "AI 发布课程",
+                                    "rights_review": "confirmed",
+                                    "copy": "已保存文案",
+                                    "member_delivery": {
+                                        "links": ["https://pan.baidu.com/s/1abc"],
+                                        "passwords": ["p123"],
+                                    },
+                                },
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
+            finally:
+                conn.close()
+            with patch.object(server, "OUTPUT_DIR", output_dir):
+                data = server._list_published_items("发布")
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["items"][0]["copy_display"], "已保存文案")
+        self.assertIn("https://pan.baidu.com/s/1abc", data["items"][0]["delivery_payload"])
+        self.assertIn("p123", data["items"][0]["delivery_payload"])
 
     def test_delivery_payload_contains_only_link_and_password(self):
         payload, status = _delivery_payload(

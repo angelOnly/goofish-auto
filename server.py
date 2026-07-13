@@ -90,6 +90,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     <p class="muted">本地资源任务、闲鱼热点监控、文案结果集中管理。</p>
   </div>
   <div class="row">
+    <button class="secondary" id="openPublishedBtn">已发布查询</button>
     <button class="secondary" id="openTasksBtn">新标签打开任务管理</button>
     <button class="secondary" id="openResultsBtn">新标签打开监控结果</button>
     <button class="secondary" id="refreshBtn">刷新</button>
@@ -123,13 +124,13 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
         <button class="secondary" id="previewBootstrapBtn">预览本地配置</button>
         <button id="startBootstrapBtn">同步/更新任务到闲鱼监控</button>
       </div>
-      <div class="help">“预览本地配置”只查看将要提交的 4 个任务，不会创建。“创建缺失任务到闲鱼监控”会调用远程 API：远程没有同名任务就创建并启动，已有同名任务会按本地配置更新。当前监控只看虚拟课程/资料/项目实战类商品，排除远程安装、账号卡密和实体商品；新品任务限制 `14天内`，热度任务不限制上新时间并翻 5 页。</div>
+      <div class="help">“预览本地配置”只查看将要提交的 5 个任务，不会创建。“创建缺失任务到闲鱼监控”会调用远程 API：远程没有同名任务就创建并启动，已有同名任务会按本地配置更新。当前监控只看虚拟课程/资料/项目实战类商品，排除远程安装、账号卡密和实体商品；新品任务限制 `14天内`，热度任务不限制上新时间并翻 5 页，高单价任务搜索更宽的 `课程` 且最低价 30。</div>
       <div id="goofishStatus" class="status"></div>
       <div id="goofishTasks"></div>
     </div>
   </section>
 
-  <section class="panel stack">
+  <section class="panel stack" id="publishedPanel">
     <h2>已发布内容查询</h2>
     <div class="row">
       <input id="publishedQuery" type="search" placeholder="搜标题、课程地址或ID" style="min-width:280px">
@@ -381,6 +382,58 @@ async function showRun(runId){
     `<table><thead><tr><th>标题</th><th>热度</th><th>市场匹配</th><th>同行价</th><th>发布状态</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   $('itemDetail').innerHTML = '';
 }
+async function loadPublishedItems(){
+  const query = $('publishedQuery').value.trim();
+  setStatus('publishedStatus','正在查询已发布内容...');
+  try{
+    const data = await api(`/api/local/published?q=${encodeURIComponent(query)}&limit=120`);
+    publishedItems = data.items || [];
+    renderPublishedItems(publishedItems, query);
+    setStatus('publishedStatus',`已发布 ${publishedItems.length} 条${query ? `，搜索：${query}` : ''}`,'ok');
+  }catch(e){
+    publishedItems = [];
+    $('publishedResults').innerHTML = '<p class="muted">查询失败。</p>';
+    setStatus('publishedStatus', e.message, 'bad');
+  }
+}
+function renderPublishedItems(items, query=''){
+  if(!items.length){
+    $('publishedResults').innerHTML = `<p class="muted">${query ? '没有匹配的已发布内容。' : '暂无已发布内容。'}</p>`;
+    return;
+  }
+  const rows = items.map((item, index) => {
+    const deliveryOk = item.delivery_payload ? '<span class="pill ok">可复制发货</span>' : `<span class="pill warn">${esc(item.delivery_status_text || '无发货信息')}</span>`;
+    const source = item.page_url ? `<a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">来源</a>` : '<span class="muted">无来源</span>';
+    return `<tr>
+      <td><strong>${esc(item.title)}</strong><br><small>${esc(item.id || '')}</small></td>
+      <td>${deliveryOk}<br><small>${esc(item.published_at || '')}</small></td>
+      <td>${source}</td>
+      <td>
+        <button class="secondary mini js-copy-published" data-index="${index}" data-field="copy_display">复制文案</button>
+        <button class="secondary mini js-copy-published" data-index="${index}" data-field="delivery_payload">复制发货</button>
+        <button class="secondary mini js-preview-published" data-index="${index}">看内容</button>
+      </td>
+    </tr>`;
+  }).join('');
+  $('publishedResults').innerHTML = `<table><thead><tr><th>标题</th><th>发货状态</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function previewPublishedItem(index){
+  const item = publishedItems[Number(index)];
+  if(!item) return;
+  currentItem = item;
+  const deliveryHtml = item.delivery_payload
+    ? `<h3>发货内容</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery_payload">复制发货</button></div><pre>${esc(item.delivery_payload)}</pre>`
+    : `<h3>发货内容</h3><p class="warn">${esc(item.delivery_status_text || '未获取百度网盘链接')}</p>`;
+  const sourceHtml = item.page_url
+    ? `<h3>来源核验</h3><p><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">${esc(item.page_url)}</a></p>`
+    : '';
+  $('itemDetail').innerHTML =
+    `<h3>已发布商品</h3><p><strong>${esc(item.title)}</strong><br><small>${esc(item.published_at || '')}</small></p>` +
+    deliveryHtml +
+    `<h3>完整闲鱼文案 ${copySourceLabel(item.copy_source)}</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_display">复制文案</button></div><pre>${esc(item.copy_display || '')}</pre>` +
+    sourceHtml;
+  $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
+}
 async function showItem(folder){
   const detailRow = detailRowFor(folder);
   const button = itemButtonFor(folder);
@@ -518,7 +571,7 @@ async function previewBootstrap(){
   finally{ btn.disabled = false; }
 }
 async function startBootstrap(){
-  if(!confirm('确认把 goofish_tasks.json 里的 4 个任务同步到闲鱼监控？远程已有同名任务会按本地配置更新，缺失任务会创建。')) return;
+  if(!confirm('确认把 goofish_tasks.json 里的 5 个任务同步到闲鱼监控？远程已有同名任务会按本地配置更新，缺失任务会创建。')) return;
   const btn = $('startBootstrapBtn');
   btn.disabled = true;
   setStatus('goofishStatus','正在创建远程缺失任务，并启动新创建的任务。当前配置只看文本，不分析图片...');
@@ -568,7 +621,7 @@ async function togglePublished(courseId, published){
   }catch(e){ setStatus('localStatus', e.message, 'bad'); }
 }
 async function refreshAll(){
-  await Promise.allSettled([loadHealth(), loadConfig(), loadLocalTasks(), loadRuns(), loadGoofishTasks()]);
+  await Promise.allSettled([loadHealth(), loadConfig(), loadLocalTasks(), loadRuns(), loadGoofishTasks(), loadPublishedItems()]);
 }
 
 document.addEventListener('click', (event) => {
@@ -581,14 +634,25 @@ document.addEventListener('click', (event) => {
   else if(target.id === 'startBootstrapBtn') startBootstrap();
   else if(target.id === 'openTasksBtn') openUrl(goofishUrls.tasks_url);
   else if(target.id === 'openResultsBtn' || target.classList.contains('js-open-results')) openUrl(goofishUrls.results_url);
+  else if(target.id === 'openPublishedBtn') $('publishedPanel').scrollIntoView({behavior:'smooth', block:'start'});
+  else if(target.id === 'searchPublishedBtn') loadPublishedItems();
+  else if(target.id === 'clearPublishedBtn'){ $('publishedQuery').value=''; loadPublishedItems(); }
   else if(target.classList.contains('js-show-run')) showRun(target.dataset.runId);
   else if(target.classList.contains('js-show-item')) showItem(target.dataset.folder);
   else if(target.classList.contains('js-copy-field')) copyText(currentItem?.[target.dataset.field], target.textContent.trim(), target);
   else if(target.classList.contains('js-copy-inline')) copyText(currentItem?.[target.dataset.field], target.textContent.trim(), target);
+  else if(target.classList.contains('js-copy-published')){
+    const item = publishedItems[Number(target.dataset.index)];
+    copyText(item?.[target.dataset.field], target.textContent.trim(), target);
+  }
+  else if(target.classList.contains('js-preview-published')) previewPublishedItem(target.dataset.index);
   else if(target.classList.contains('js-show-full')) showFullItem(target.dataset.folder);
   else if(target.classList.contains('js-toggle-published')) togglePublished(target.dataset.courseId, target.dataset.published === 'true');
   else if(target.classList.contains('js-start-remote')) startRemoteTask(target.dataset.taskId);
   else if(target.classList.contains('js-stop-remote')) stopRemoteTask(target.dataset.taskId);
+});
+document.addEventListener('keydown', (event) => {
+  if(event.key === 'Enter' && event.target?.id === 'publishedQuery') loadPublishedItems();
 });
 window.addEventListener('error', (event) => setStatus('localStatus', `页面脚本错误：${event.message}`, 'bad'));
 refreshAll();
@@ -873,7 +937,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "/":
+            if path in {"/", "/published"}:
                 self._send(200, HTML, "text/html; charset=utf-8")
             elif path == "/api/health":
                 self._send(200, {"ok": True, "output_dir": str(OUTPUT_DIR)})
