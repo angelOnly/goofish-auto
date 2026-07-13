@@ -24,7 +24,7 @@ def main() -> int:
     sub.add_parser("list", help="列出监控任务")
     run = sub.add_parser("run", help="运行指定任务")
     run.add_argument("--task", required=True, help="tasks.json 中的任务名称")
-    run.add_argument("--include-seen", action="store_true", help="包含之前已经发现过的条目")
+    run.add_argument("--include-seen", action="store_true", help="包含已标记发布的课程（默认会过滤已发布课程）")
 
     serve = sub.add_parser("serve", help="启动本地审核页面")
     serve.add_argument("--host", default=os.getenv("PIPELINE_HOST", "127.0.0.1"))

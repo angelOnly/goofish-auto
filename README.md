@@ -9,7 +9,7 @@
 ## 运行
 
 ```powershell
-cd E:\ai\skills\xinli\resource_pipeline
+cd E:\ai\skills\tools\goofish-auto
 python .\cli.py list
 python .\cli.py run --task "AI虚拟课程选品整理"
 python .\cli.py serve
@@ -17,7 +17,9 @@ python .\cli.py serve
 
 然后打开 `http://127.0.0.1:8765/`。TheItzy 的 robots.txt 声明了 10 秒 crawl-delay，所以默认每次请求间隔 10 秒；不要通过并发、代理轮换或改 User-Agent 绕过限制。
 
-本地整理任务默认只看近 15 天 TheItzy 公开元数据，并优先筛选 AI 课程、教程、资料、项目实战等虚拟产品方向；会排除远程安装配置、账号卡密、实体商品等不适合的内容。页面“运行诊断”会显示抓取数、已处理跳过数、超过时效过滤数、排除词过滤数、关键词命中数和最终输出数；容器日志也会打印每页抓取、筛选和完成状态。若输出为 0，优先看诊断里的 `zero_reason`。
+本地整理任务默认只看近 15 天 TheItzy 公开元数据，并优先筛选 AI 课程、教程、资料、项目实战等虚拟产品方向；会排除远程安装配置、账号卡密、实体商品等不适合的内容。运行时还会读取闲鱼监控的 `/api/results/files` 与 `/api/results/{filename}`，把闲鱼市场结果转换成市场信号，再给 TheItzy 课程加权排序。页面“运行诊断”会显示抓取数、已发布过滤数、超过时效过滤数、排除词过滤数、关键词命中数、闲鱼市场样本数和最终输出数；容器日志也会打印每页抓取、筛选和完成状态。若输出为 0，优先看诊断里的 `zero_reason`。
+
+每次被选中的课程都会写入 `output/selection.sqlite3`。页面结果表里可以把某个课程标记为“已发布”或“取消发布”：默认下次选品只过滤“已发布”的课程；只是被选中过但你还没发布的课程，不会被过滤，仍然可以继续参与下一轮筛选。
 
 ## 自动创建闲鱼热点监控任务
 

@@ -15,13 +15,15 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -31,6 +33,19 @@ TASKS_FILE = ROOT / "tasks.json"
 ENV_FILE = ROOT / ".env"
 USER_AGENT = "XinliResourcePipeline/0.1 (local review; respects robots.txt)"
 LOGGER = logging.getLogger("goofish_auto.pipeline")
+GENERIC_MARKET_TERMS = {
+    "ai",
+    "人工智能",
+    "ai课程",
+    "ai教程",
+    "ai资料",
+    "课程",
+    "教程",
+    "资料",
+    "项目",
+    "实战",
+    "项目实战",
+}
 
 
 class TextExtractor(HTMLParser):
@@ -98,6 +113,38 @@ def http_text(url: str, *, timeout: int = 30, headers: Optional[Dict[str, str]] 
 
 def http_json(url: str, *, timeout: int = 30) -> Any:
     return json.loads(http_text(url, timeout=timeout, headers={"Accept": "application/json"}))
+
+
+def get_first(mapping: Dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
+    for key in keys:
+        if key in mapping:
+            value = mapping[key]
+            if value is not None and value != "":
+                return value
+    return default
+
+
+def parse_price(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    raw = str(value).replace(",", "")
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", raw)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return round((ordered[mid - 1] + ordered[mid]) / 2, 2)
 
 
 def sleep_between_requests(last_request: List[float], interval: float) -> None:
@@ -288,6 +335,164 @@ def matches_any_keyword(item: Dict[str, Any], keywords: Iterable[str]) -> bool:
     return any(str(value).strip().lower() in text for value in keywords if str(value).strip())
 
 
+def _normalise_term(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _market_terms_from_record(record: Dict[str, Any], task_keywords: Iterable[str]) -> List[str]:
+    title = _normalise_term(record.get("title"))
+    ai = record.get("ai_analysis") or {}
+    raw_terms = list(ai.get("matched_keywords") or [])
+    for keyword in task_keywords:
+        term = _normalise_term(keyword)
+        if term and term in title:
+            raw_terms.append(term)
+    terms: List[str] = []
+    for value in raw_terms:
+        term = _normalise_term(value)
+        if len(term) < 2:
+            continue
+        if term in GENERIC_MARKET_TERMS:
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms[:12]
+
+
+def parse_goofish_result_record(raw: Dict[str, Any], task_keywords: Iterable[str]) -> Optional[Dict[str, Any]]:
+    product = raw.get("商品信息") or raw.get("商品信息".encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")) or {}
+    if not isinstance(product, dict):
+        product = {}
+    ai = raw.get("ai_analysis") or {}
+    price_insight = raw.get("price_insight") or {}
+    title = get_first(product, ["商品标题", "title", "标题"], "")
+    if not title:
+        return None
+    price = parse_price(get_first(product, ["当前售价", "价格", "price"], None))
+    if price is None:
+        price = parse_price(price_insight.get("current_price"))
+    wants = parse_metric(get_first(product, ["“想要”人数", "想要人数", "want_count"], 0))
+    views = parse_metric(get_first(product, ["浏览量", "views"], 0))
+    keyword_hit_count = int(ai.get("keyword_hit_count") or 0)
+    is_recommended = bool(ai.get("is_recommended"))
+    terms = _market_terms_from_record({"title": title, "ai_analysis": ai}, task_keywords)
+    strength = 1.0 + min(8.0, wants * 0.35) + min(6.0, views * 0.04)
+    strength += keyword_hit_count * 1.5
+    if is_recommended:
+        strength += 5.0
+    if price is not None and price > 0:
+        strength += min(4.0, price / 10.0)
+    return {
+        "title": str(title),
+        "price": price,
+        "wants": wants,
+        "views": views,
+        "publish_time": get_first(product, ["发布时间", "publish_time"], ""),
+        "crawl_time": raw.get("爬取时间"),
+        "link": get_first(product, ["商品链接", "link"], ""),
+        "search_keyword": raw.get("搜索关键字"),
+        "task_name": raw.get("任务名称"),
+        "is_recommended": is_recommended,
+        "analysis_source": ai.get("analysis_source"),
+        "keyword_hit_count": keyword_hit_count,
+        "matched_keywords": list(ai.get("matched_keywords") or []),
+        "terms": terms,
+        "strength": round(strength, 2),
+    }
+
+
+def fetch_goofish_market_signals(task: Dict[str, Any]) -> Dict[str, Any]:
+    config = task.get("goofish_market")
+    if not isinstance(config, dict) or config.get("enabled") is not True:
+        return {"enabled": False, "signals": [], "files": [], "error": ""}
+    base_url = str(
+        config.get("base_url")
+        or os.getenv("GOOFISH_API_BASE_URL")
+        or "https://goofish.xiaolicloud.cn:18443"
+    ).rstrip("/")
+    limit = max(1, min(int(config.get("limit", 100)), 100))
+    max_files = max(1, min(int(config.get("max_files", 3)), 10))
+    result_keywords = [_normalise_term(value) for value in config.get("result_keywords", []) if str(value).strip()]
+    task_keywords = [str(value) for value in task.get("keywords", []) if str(value).strip()]
+    timeout = int(config.get("timeout", 30))
+    try:
+        files_payload = http_json(f"{base_url}/api/results/files", timeout=timeout)
+        files = [str(value) for value in files_payload.get("files", []) if str(value).endswith(".jsonl")]
+        if result_keywords:
+            files = [name for name in files if any(term in _normalise_term(name) for term in result_keywords)]
+        files = files[:max_files]
+        signals: List[Dict[str, Any]] = []
+        for filename in files:
+            query = urlencode(
+                {
+                    "limit": limit,
+                    "page": 1,
+                    "sort_by": config.get("sort_by", "crawl_time"),
+                    "sort_order": config.get("sort_order", "desc"),
+                    "include_hidden": str(bool(config.get("include_hidden", False))).lower(),
+                }
+            )
+            url = f"{base_url}/api/results/{quote(filename, safe='')}?{query}"
+            payload = http_json(url, timeout=timeout)
+            for raw in payload.get("items", []):
+                if not isinstance(raw, dict) or raw.get("_effective_hidden"):
+                    continue
+                signal = parse_goofish_result_record(raw, task_keywords)
+                if signal:
+                    signal["result_file"] = filename
+                    signals.append(signal)
+        LOGGER.info("goofish_market fetched files=%s signals=%s", len(files), len(signals))
+        return {"enabled": True, "signals": signals, "files": files, "error": ""}
+    except Exception as exc:  # noqa: BLE001 - market signals are optional.
+        LOGGER.exception("goofish_market fetch failed")
+        return {"enabled": True, "signals": [], "files": [], "error": str(exc)}
+
+
+def apply_market_signals(item: Dict[str, Any], signals: List[Dict[str, Any]]) -> Dict[str, Any]:
+    text = item_search_text(item)
+    matched_terms: List[str] = []
+    matched_refs: List[Dict[str, Any]] = []
+    score = 0.0
+    prices: List[float] = []
+    for signal in signals:
+        terms = [term for term in signal.get("terms", []) if term and term in text]
+        if not terms:
+            continue
+        for term in terms:
+            if term not in matched_terms:
+                matched_terms.append(term)
+        score += float(signal.get("strength", 0.0)) * min(2.0, 0.7 + 0.35 * len(terms))
+        if signal.get("price") is not None:
+            prices.append(float(signal["price"]))
+        if len(matched_refs) < 5:
+            matched_refs.append(
+                {
+                    "title": signal.get("title"),
+                    "price": signal.get("price"),
+                    "wants": signal.get("wants"),
+                    "views": signal.get("views"),
+                    "matched_terms": terms,
+                    "is_recommended": signal.get("is_recommended"),
+                    "link": signal.get("link"),
+                }
+            )
+    market_score = round(min(35.0, score), 1)
+    total_score = round(min(100.0, float(item.get("hotness_score", 0.0)) + market_score), 1)
+    return {
+        **item,
+        "base_hotness_score": item.get("hotness_score", 0.0),
+        "hotness_score": total_score,
+        "market_match_score": market_score,
+        "market_matched_terms": matched_terms[:12],
+        "market_reference_count": len(matched_refs),
+        "market_reference_titles": matched_refs,
+        "market_avg_price": round(sum(prices) / len(prices), 2) if prices else None,
+        "market_median_price": median(prices),
+        "market_price_min": min(prices) if prices else None,
+        "market_price_max": max(prices) if prices else None,
+    }
+
+
 def safe_slug(value: str) -> str:
     value = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "-", value).strip("-")
     return value[:80] or "item"
@@ -354,6 +559,17 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
     audit_prefix = ""
     if not task.get("rights_confirmed"):
         audit_prefix = "【内部审核草稿｜暂勿发布】\n当前未完成内容权利确认，禁止发布、售卖或交付。审核通过后再改成正式上架文案。\n\n"
+    market_terms = item.get("market_matched_terms") or []
+    market_reference = ""
+    if market_terms:
+        price_hint = ""
+        if item.get("market_median_price") is not None:
+            price_hint = f"；闲鱼同类监控中位价约 ¥{item.get('market_median_price')}"
+        market_reference = (
+            "\n【市场参考】\n"
+            f"闲鱼热点监控命中：{', '.join(str(value) for value in market_terms[:8])}{price_hint}。"
+            "该信息仅用于判断需求，不代表可直接发布或交付第三方内容。\n\n"
+        )
 
     return (
         audit_prefix
@@ -371,6 +587,7 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
         + "- 主题明确，适合做学习路线或选品需求判断\n"
         + "- 支持先确认目录/格式/适用人群，再决定是否拍下\n"
         + "- 如用于正式发布，请只交付自有或已授权的网盘内容\n\n"
+        + market_reference
         + "【关键信息】\n"
         + f"主题分类：{category_text}\n"
         + "交付方式：审核通过后填写你自己的授权百度网盘链接\n"
@@ -439,14 +656,165 @@ def load_state(path: Path) -> Dict[str, Any]:
         return {"seen": {}}
 
 
+def selection_db_path(output_dir: Path = OUTPUT_DIR) -> Path:
+    return output_dir / "selection.sqlite3"
+
+
+def init_selection_db(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS course_selections (
+                    course_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    source TEXT,
+                    page_url TEXT,
+                    first_selected_at TEXT NOT NULL,
+                    last_selected_at TEXT NOT NULL,
+                    last_run_id TEXT,
+                    last_task_name TEXT,
+                    selection_count INTEGER NOT NULL DEFAULT 0,
+                    published INTEGER NOT NULL DEFAULT 0,
+                    published_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    last_hotness_score REAL,
+                    last_market_match_score REAL,
+                    raw_json TEXT
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_course_selections_published ON course_selections(published)")
+
+
+def get_selection_statuses(course_ids: Iterable[str], db_path: Path) -> Dict[str, Dict[str, Any]]:
+    ids = [str(value) for value in course_ids if str(value)]
+    if not ids:
+        return {}
+    init_selection_db(db_path)
+    placeholders = ",".join("?" for _ in ids)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT course_id, published, published_at, selection_count, last_selected_at
+            FROM course_selections
+            WHERE course_id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+    return {
+        str(row["course_id"]): {
+            "published": bool(row["published"]),
+            "published_at": row["published_at"],
+            "selection_count": int(row["selection_count"] or 0),
+            "last_selected_at": row["last_selected_at"],
+        }
+        for row in rows
+    }
+
+
+def get_published_course_ids(db_path: Path) -> set[str]:
+    init_selection_db(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT course_id FROM course_selections WHERE published = 1").fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def save_selected_courses(
+    items: List[Dict[str, Any]],
+    *,
+    run_id: str,
+    task_name: str,
+    db_path: Path,
+) -> Dict[str, Dict[str, Any]]:
+    init_selection_db(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            for item in items:
+                course_id = str(item.get("id") or "")
+                if not course_id:
+                    continue
+                existing = conn.execute(
+                    "SELECT first_selected_at, selection_count, published, published_at FROM course_selections WHERE course_id = ?",
+                    (course_id,),
+                ).fetchone()
+                first_selected_at = existing[0] if existing else now
+                selection_count = int(existing[1] or 0) + 1 if existing else 1
+                published = int(existing[2]) if existing else 0
+                published_at = existing[3] if existing else None
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO course_selections (
+                        course_id, title, source, page_url, first_selected_at, last_selected_at,
+                        last_run_id, last_task_name, selection_count, published, published_at,
+                        updated_at, last_hotness_score, last_market_match_score, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        course_id,
+                        str(item.get("title") or ""),
+                        str(item.get("source") or ""),
+                        str(item.get("page_url") or ""),
+                        first_selected_at,
+                        now,
+                        run_id,
+                        task_name,
+                        selection_count,
+                        published,
+                        published_at,
+                        now,
+                        float(item.get("hotness_score") or 0),
+                        float(item.get("market_match_score") or 0),
+                        json.dumps(item, ensure_ascii=False),
+                    ),
+                )
+    return get_selection_statuses([str(item.get("id") or "") for item in items], db_path)
+
+
+def set_course_published(course_id: str, published: bool, db_path: Path) -> Dict[str, Any]:
+    init_selection_db(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    published_at = now if published else None
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            existing = conn.execute(
+                "SELECT course_id FROM course_selections WHERE course_id = ?",
+                (course_id,),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE course_selections
+                    SET published = ?, published_at = ?, updated_at = ?
+                    WHERE course_id = ?
+                    """,
+                    (1 if published else 0, published_at, now, course_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO course_selections (
+                        course_id, title, source, page_url, first_selected_at, last_selected_at,
+                        selection_count, published, published_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (course_id, course_id, "", "", now, now, 0, 1 if published else 0, published_at, now),
+                )
+    return get_selection_statuses([course_id], db_path).get(course_id, {"published": published})
+
+
 def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_seen: bool = False) -> Dict[str, Any]:
     load_env_file()
     output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / "state.json"
     state = load_state(state_path)
     task_name = str(task.get("name") or "未命名任务")
-    task_seen = state.setdefault("seen_by_task", {}).setdefault(task_name, {})
     legacy_seen = state.setdefault("seen", {})
+    db_path = selection_db_path(output_dir)
+    published_course_ids = get_published_course_ids(db_path)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -471,25 +839,35 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     note(
         "run_start",
         source=task.get("source"),
-        include_seen=include_seen,
+        include_published=include_seen,
         keyword_count=len(keywords),
         exclude_keyword_count=len(exclude_keywords),
         max_age_days=max_age_days,
         output_limit=output_limit,
     )
+    market_data = fetch_goofish_market_signals(task)
+    market_signals = list(market_data.get("signals", []))
+    note(
+        "market_signals_fetched",
+        enabled=market_data.get("enabled"),
+        file_count=len(market_data.get("files", [])),
+        signal_count=len(market_signals),
+        error=market_data.get("error", ""),
+    )
     raw_items = fetch_source(task)
     note("source_fetched", fetched_count=len(raw_items))
 
-    skipped_seen = 0
+    skipped_published = 0
     skipped_old = 0
     skipped_excluded = 0
     candidates: List[Dict[str, Any]] = []
     for raw in raw_items:
         item_id = str(raw.get("id") or "")
-        if not include_seen and item_id in task_seen:
-            skipped_seen += 1
+        if not include_seen and item_id in published_course_ids:
+            skipped_published += 1
             continue
         scored = score_item(raw, keywords)
+        scored = apply_market_signals(scored, market_signals)
         if max_age_days is not None and float(scored.get("age_days", 365.0)) > max_age_days:
             skipped_old += 1
             continue
@@ -507,8 +885,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     zero_reason = ""
     if not raw_items:
         zero_reason = "数据源没有返回文章，请检查 TheItzy API、网络或站点状态。"
-    elif skipped_seen == len(raw_items) and not include_seen:
-        zero_reason = "本次抓到的文章都已经在这个任务里处理过；如需复查旧数据，请勾选“包含已处理”。"
+    elif skipped_published == len(raw_items) and not include_seen:
+        zero_reason = "本次抓到的文章都已经标记为已发布；如需复查已发布课程，请勾选“包含已发布”。"
     elif skipped_old and not candidates:
         zero_reason = f"本次抓到的文章都超过 {int(max_age_days or 0)} 天时效；已按新发布虚拟产品口径过滤。"
     elif skipped_excluded and not candidates:
@@ -520,7 +898,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
 
     diagnostics = {
         "fetched_count": len(raw_items),
-        "skipped_seen_count": skipped_seen,
+        "skipped_seen_count": skipped_published,
+        "skipped_published_count": skipped_published,
         "skipped_old_count": skipped_old,
         "skipped_excluded_count": skipped_excluded,
         "candidate_count": len(candidates),
@@ -533,11 +912,17 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         "keywords": keywords,
         "exclude_keywords": exclude_keywords,
         "max_age_days": max_age_days,
+        "market_enabled": market_data.get("enabled"),
+        "market_signal_count": len(market_signals),
+        "market_files": market_data.get("files", []),
+        "market_error": market_data.get("error", ""),
         "top_candidates": [
             {
                 "title": item.get("title"),
                 "hotness_score": item.get("hotness_score"),
                 "matched_keywords": item.get("matched_keywords", []),
+                "market_match_score": item.get("market_match_score", 0),
+                "market_matched_terms": item.get("market_matched_terms", []),
             }
             for item in pool[:5]
         ],
@@ -545,7 +930,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     note(
         "selection_done",
         fetched_count=diagnostics["fetched_count"],
-        skipped_seen_count=skipped_seen,
+        skipped_published_count=skipped_published,
         skipped_old_count=skipped_old,
         skipped_excluded_count=skipped_excluded,
         candidate_count=len(candidates),
@@ -553,9 +938,13 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         selected_count=len(items),
         fallback_used=fallback_used,
         zero_reason=zero_reason,
+        market_signal_count=len(market_signals),
     )
 
+    selection_statuses = save_selected_courses(items, run_id=run_id, task_name=task_name, db_path=db_path)
+
     for item in items:
+        item["selection_status"] = selection_statuses.get(str(item.get("id") or ""), {"published": False})
         item["cover_local_path"] = download_authorized_cover(item, task, asset_dir)
         item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
         ai_copy = maybe_ai_copy(item, task)
@@ -591,7 +980,6 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         (item_dir / "item.json").write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
         seen_record = {"run_id": run_id, "title": item.get("title")}
         if item.get("id"):
-            task_seen[str(item["id"])] = seen_record
             legacy_seen[str(item["id"])] = seen_record
 
     note("run_complete", count=len(items), run_dir=str(run_dir))
@@ -609,6 +997,14 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
                 "id": item["id"],
                 "title": item["title"],
                 "hotness_score": item["hotness_score"],
+                "base_hotness_score": item.get("base_hotness_score", item["hotness_score"]),
+                "market_match_score": item.get("market_match_score", 0),
+                "market_matched_terms": item.get("market_matched_terms", []),
+                "market_reference_count": item.get("market_reference_count", 0),
+                "market_reference_titles": item.get("market_reference_titles", []),
+                "market_avg_price": item.get("market_avg_price"),
+                "market_median_price": item.get("market_median_price"),
+                "selection_status": item.get("selection_status", {"published": False}),
                 "matched_keywords": item.get("matched_keywords", []),
                 "page_url": item["page_url"],
                 "folder": str((run_dir / f"{index:02d}-{safe_slug(item['title'])}").relative_to(output_dir)).replace("\\", "/"),

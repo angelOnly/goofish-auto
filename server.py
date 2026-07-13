@@ -18,10 +18,26 @@ try:
         create_from_specs,
         load_specs,
     )
-    from .pipeline import OUTPUT_DIR, load_tasks, run_named_task, template_copy
+    from .pipeline import (
+        OUTPUT_DIR,
+        get_selection_statuses,
+        load_tasks,
+        run_named_task,
+        selection_db_path,
+        set_course_published,
+        template_copy,
+    )
 except ImportError:  # direct invocation from the project root
     from goofish_tasks import DEFAULT_BASE_URL, GoofishAPIError, GoofishClient, create_from_specs, load_specs
-    from pipeline import OUTPUT_DIR, load_tasks, run_named_task, template_copy
+    from pipeline import (
+        OUTPUT_DIR,
+        get_selection_statuses,
+        load_tasks,
+        run_named_task,
+        selection_db_path,
+        set_course_published,
+        template_copy,
+    )
 
 
 HTML = """<!doctype html>
@@ -41,6 +57,7 @@ main{padding:16px 32px 32px;display:grid;gap:16px}
 .panel{padding:18px}.card{padding:14px}.card small,.muted{color:var(--muted)}.card strong{display:block;margin-top:8px;font-size:18px}
 button,select,input{font:inherit}button,select{height:38px;border-radius:8px;border:1px solid #cbd5e1;background:white;padding:0 12px}
 button{background:var(--blue);border-color:var(--blue);color:white;cursor:pointer}button.secondary{background:white;color:var(--text);border-color:#cbd5e1}button.danger{background:var(--red);border-color:var(--red)}
+button.mini{height:28px;border-radius:7px;padding:0 8px;font-size:13px}
 button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.stack{display:grid;gap:12px}
 .status{min-height:22px;color:var(--muted)}.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #eef1f5;padding:10px 8px;vertical-align:top}th{color:var(--muted);font-weight:600}
@@ -49,6 +66,10 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
 .help{background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;padding:12px;color:#475569;line-height:1.7}
 .copy-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.cover-preview{max-width:360px;width:100%;border:1px solid var(--line);border-radius:8px;margin-top:8px;background:white}
 .image-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:12px 0}.tiny{font-size:12px;color:var(--muted)}
+.inline-detail-row td{background:#fbfdff;padding:0 8px 12px}.inline-copy-panel{border:1px solid #dbe5f0;border-radius:8px;padding:10px 12px;margin:4px 0 8px;background:white}
+.inline-copy-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.inline-copy-head h3{margin:0;font-size:14px}.inline-copy-actions{display:flex;gap:6px;flex-wrap:wrap}
+.copy-preview{white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.65;color:#24324a;background:#f8fafc;border:1px solid #edf2f7;border-radius:7px;padding:8px;margin:0}
+.publish-cell{min-width:110px}.publish-cell small{display:block;color:var(--muted);margin-top:4px}
 @media (max-width:1000px){.grid,.cards{grid-template-columns:1fr}header{display:block}main,header{padding-left:16px;padding-right:16px}}
 </style>
 </head>
@@ -77,7 +98,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
       <h2>本地资源整理</h2>
       <div class="row">
         <select id="localTask"></select>
-        <label class="row"><input id="includeSeen" type="checkbox"> 包含已处理</label>
+        <label class="row"><input id="includeSeen" type="checkbox"> 包含已发布</label>
         <button id="runBtn">运行一次</button>
       </div>
       <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI虚拟课程选品整理”任务；默认只看近 15 天、课程/教程/资料/项目实战类内容，并排除远程安装、账号卡密和实体商品。下面的“闲鱼热点监控”才是远程闲鱼监控任务。</div>
@@ -109,6 +130,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
 const $ = (id) => document.getElementById(id);
 let goofishUrls = {tasks_url:'https://goofish.xiaolicloud.cn:18443/tasks?create=1', results_url:'https://goofish.xiaolicloud.cn:18443/results'};
 let currentItem = null;
+let expandedFolder = null;
 
 function esc(value){
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -180,7 +202,24 @@ function renderDiagnostics(data){
   }).join('');
   const age = d.max_age_days ? `；超过 ${esc(d.max_age_days)} 天过滤 ${esc(d.skipped_old_count ?? 0)} 条` : '';
   const excluded = d.exclude_keywords?.length ? `；排除词过滤 ${esc(d.skipped_excluded_count ?? 0)} 条` : '';
-  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已处理跳过 ${esc(d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+  const market = d.market_enabled ? `；闲鱼市场样本 ${esc(d.market_signal_count ?? 0)} 条` : '';
+  const marketError = d.market_error ? `<p class="warn">闲鱼市场信号读取失败：${esc(d.market_error)}</p>` : '';
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+}
+function detailRowFor(folder){
+  return [...document.querySelectorAll('.inline-detail-row')].find(row => row.dataset.detailFor === folder);
+}
+function itemButtonFor(folder){
+  return [...document.querySelectorAll('.js-show-item')].find(btn => btn.dataset.folder === folder);
+}
+function publishCellHtml(item){
+  const status = item.selection_status || {};
+  const published = Boolean(status.published);
+  const label = published ? '<span class="pill ok">已发布</span>' : '<span class="pill">未发布</span>';
+  const action = published ? '取消发布' : '标记已发布';
+  const publishedValue = published ? 'false' : 'true';
+  const time = status.published_at ? `<small>${esc(status.published_at)}</small>` : '';
+  return `<div class="publish-cell">${label}${time}<br><button class="secondary mini js-toggle-published" data-course-id="${esc(item.id)}" data-published="${publishedValue}">${action}</button></div>`;
 }
 
 async function loadConfig(){
@@ -220,22 +259,74 @@ async function runLocalTask(){
 }
 async function showRun(runId){
   const data = await api(`/api/local/runs/${encodeURIComponent(runId)}`);
-  const rows = (data.items || []).map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.hotness_score)}</td><td><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">来源</a></td><td><button class="secondary js-show-item" data-folder="${esc(item.folder)}">文案</button></td></tr>`).join('');
+  expandedFolder = null;
+  const rows = (data.items || []).map(item => {
+    const folder = esc(item.folder);
+    const marketTerms = (item.market_matched_terms || []).slice(0, 4).join(', ');
+    const marketCell = item.market_match_score
+      ? `<span class="pill ok">+${esc(item.market_match_score)}</span><br><small>${esc(marketTerms)}</small>`
+      : '<span class="muted">无</span>';
+    return `<tr class="result-row" data-folder="${folder}" data-course-id="${esc(item.id)}"><td>${esc(item.title)}</td><td>${esc(item.hotness_score)}<br><small>本地 ${esc(item.base_hotness_score ?? item.hotness_score)}</small></td><td>${marketCell}</td><td>${publishCellHtml(item)}</td><td><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">来源</a></td><td><button class="secondary mini js-show-item" data-folder="${folder}">文案</button></td></tr><tr class="inline-detail-row" data-detail-for="${folder}" style="display:none"><td colspan="6"></td></tr>`;
+  }).join('');
   $('runDetail').innerHTML = `<p><span class="pill">${esc(data.task_name)}</span> ${esc(data.count)} 条</p>` +
     renderDiagnostics(data) +
-    `<table><thead><tr><th>标题</th><th>热度</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    `<table><thead><tr><th>标题</th><th>热度</th><th>市场匹配</th><th>发布状态</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   $('itemDetail').innerHTML = '';
 }
 async function showItem(folder){
+  const detailRow = detailRowFor(folder);
+  const button = itemButtonFor(folder);
+  if(expandedFolder === folder && detailRow && detailRow.style.display !== 'none'){
+    detailRow.style.display = 'none';
+    if(button) button.textContent = '文案';
+    expandedFolder = null;
+    return;
+  }
+  document.querySelectorAll('.inline-detail-row').forEach(row => row.style.display = 'none');
+  document.querySelectorAll('.js-show-item').forEach(btn => btn.textContent = '文案');
+  if(detailRow){
+    detailRow.style.display = '';
+    detailRow.querySelector('td').innerHTML = '<div class="inline-copy-panel muted">正在加载文案...</div>';
+  }
+  if(button) button.textContent = '收起';
   const data = await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
+  currentItem = data;
+  const copyText = data.copy_suggested || data.copy;
+  expandedFolder = folder;
+  if(detailRow){
+    const imageButton = data.cover_url ? `<button class="secondary mini js-copy-inline" data-field="cover_url">复制图片链接</button>` : '';
+    const marketTerms = (data.item?.market_matched_terms || []).slice(0, 8).join(', ');
+    const marketRefs = (data.item?.market_reference_titles || []).slice(0, 3).map(ref => `<li>${esc(ref.title)}${ref.price ? ` <small>¥${esc(ref.price)}</small>` : ''}</li>`).join('');
+    const marketHtml = marketTerms
+      ? `<p class="tiny">闲鱼匹配：${esc(marketTerms)}${data.item?.market_median_price ? `；中位价约 ¥${esc(data.item.market_median_price)}` : ''}</p>${marketRefs ? `<ul class="tiny">${marketRefs}</ul>` : ''}`
+      : '<p class="tiny">暂无闲鱼市场匹配。</p>';
+    detailRow.querySelector('td').innerHTML =
+      `<div class="inline-copy-panel">
+        <div class="inline-copy-head">
+          <h3>闲鱼文案预览</h3>
+          <div class="inline-copy-actions">
+            <button class="secondary mini js-copy-inline" data-field="copy_suggested">复制文案</button>
+            <button class="secondary mini js-copy-inline" data-field="delivery">复制发货</button>
+            ${imageButton}
+            <button class="secondary mini js-show-full" data-folder="${esc(folder)}">看完整</button>
+          </div>
+        </div>
+        ${marketHtml}
+        <p class="copy-preview">${esc(copyText)}</p>
+      </div>`;
+  }
+}
+async function showFullItem(folder){
+  const data = currentItem?.folder === folder ? currentItem : await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
   currentItem = data;
   const copyText = data.copy_suggested || data.copy;
   const imageHtml = data.cover_url
     ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">公开封面仅供人工核验。正式上架建议使用你自己有权使用的封面图、目录长图或重新制作说明图。</p><p><a target="_blank" rel="noreferrer" href="${esc(data.cover_url)}">${esc(data.cover_url)}</a></p><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览"></div>`
     : `<div class="image-box"><h3>图片信息</h3><p class="muted">这个条目没有公开封面地址。正式上架时建议补一张自有/授权封面图或目录图。</p></div>`;
   $('itemDetail').innerHTML = imageHtml +
-    `<h3>新版闲鱼文案</h3><div class="copy-actions"><button class="secondary js-copy-field" data-field="copy_suggested">复制文案</button><button class="secondary js-copy-field" data-field="cover_url">复制图片链接</button></div><pre>${esc(copyText)}</pre>` +
-    `<h3>发货信息 delivery.md</h3><div class="copy-actions"><button class="secondary js-copy-field" data-field="delivery">复制发货信息</button></div><pre>${esc(data.delivery)}</pre>`;
+    `<h3>完整闲鱼文案</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_suggested">复制文案</button><button class="secondary mini js-copy-field" data-field="cover_url">复制图片链接</button></div><pre>${esc(copyText)}</pre>` +
+    `<h3>发货信息 delivery.md</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery">复制发货信息</button></div><pre>${esc(data.delivery)}</pre>`;
+  $('itemDetail').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 async function loadGoofishTasks(){
@@ -315,6 +406,26 @@ async function stopRemoteTask(taskId){
     await loadGoofishTasks();
   }catch(e){ setStatus('goofishStatus', e.message, 'bad'); }
 }
+async function togglePublished(courseId, published){
+  setStatus('localStatus', published ? '正在标记已发布...' : '正在取消发布标记...');
+  try{
+    const data = await api('/api/local/selection/published',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({course_id:courseId,published})
+    });
+    document.querySelectorAll(`[data-course-id="${CSS.escape(courseId)}"]`).forEach(row => {
+      const cell = row.querySelector('.publish-cell');
+      if(cell){
+        cell.outerHTML = publishCellHtml({id:courseId, selection_status:data});
+      }
+    });
+    if(currentItem?.item?.id === courseId){
+      currentItem.item.selection_status = data;
+    }
+    setStatus('localStatus', published ? '已标记为已发布；下次默认会过滤它。' : '已取消发布；下次仍可参与选品。','ok');
+  }catch(e){ setStatus('localStatus', e.message, 'bad'); }
+}
 async function refreshAll(){
   await Promise.allSettled([loadHealth(), loadConfig(), loadLocalTasks(), loadRuns(), loadGoofishTasks()]);
 }
@@ -332,6 +443,9 @@ document.addEventListener('click', (event) => {
   else if(target.classList.contains('js-show-run')) showRun(target.dataset.runId);
   else if(target.classList.contains('js-show-item')) showItem(target.dataset.folder);
   else if(target.classList.contains('js-copy-field')) copyText(currentItem?.[target.dataset.field], target.textContent.trim());
+  else if(target.classList.contains('js-copy-inline')) copyText(currentItem?.[target.dataset.field], target.textContent.trim());
+  else if(target.classList.contains('js-show-full')) showFullItem(target.dataset.folder);
+  else if(target.classList.contains('js-toggle-published')) togglePublished(target.dataset.courseId, target.dataset.published === 'true');
   else if(target.classList.contains('js-start-remote')) startRemoteTask(target.dataset.taskId);
   else if(target.classList.contains('js-stop-remote')) stopRemoteTask(target.dataset.taskId);
 });
@@ -371,6 +485,9 @@ def _read_output_item(folder: str) -> dict[str, object]:
     delivery_path = item_dir / "delivery.md"
     item_path = item_dir / "item.json"
     item = json.loads(item_path.read_text(encoding="utf-8")) if item_path.exists() else {}
+    if item.get("id"):
+        statuses = get_selection_statuses([str(item["id"])], selection_db_path(OUTPUT_DIR))
+        item["selection_status"] = statuses.get(str(item["id"]), item.get("selection_status") or {"published": False})
     rights_confirmed = item.get("rights_review") == "confirmed"
     copy_suggested = template_copy(item, {"rights_confirmed": rights_confirmed}) if item else ""
     return {
@@ -384,6 +501,19 @@ def _read_output_item(folder: str) -> dict[str, object]:
         "title": item.get("title", ""),
         "item": item,
     }
+
+
+def _enrich_summary_selection_status(summary: dict[str, object]) -> dict[str, object]:
+    items = summary.get("items")
+    if not isinstance(items, list):
+        return summary
+    ids = [str(item.get("id") or "") for item in items if isinstance(item, dict)]
+    statuses = get_selection_statuses(ids, selection_db_path(OUTPUT_DIR))
+    for item in items:
+        if isinstance(item, dict):
+            course_id = str(item.get("id") or "")
+            item["selection_status"] = statuses.get(course_id, item.get("selection_status") or {"published": False})
+    return summary
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -431,7 +561,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not summary_path.exists():
                     self._send(404, {"error": "运行记录不存在"})
                 else:
-                    self._send(200, json.loads(summary_path.read_text(encoding="utf-8")))
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                    self._send(200, _enrich_summary_selection_status(summary))
             elif path == "/api/local/item":
                 folder = parse_qs(parsed.query).get("folder", [""])[0]
                 self._send(200, _read_output_item(folder))
@@ -491,6 +622,16 @@ class Handler(BaseHTTPRequestHandler):
                 if task_id in {None, ""}:
                     raise ValueError("缺少 task_id")
                 self._send(200, _goofish_client().stop(task_id))
+            elif path == "/api/local/selection/published":
+                course_id = str(body.get("course_id") or "")
+                if not course_id:
+                    raise ValueError("缺少 course_id")
+                result = set_course_published(
+                    course_id,
+                    bool(body.get("published", False)),
+                    selection_db_path(OUTPUT_DIR),
+                )
+                self._send(200, result)
             else:
                 self._send(404, {"error": "not found"})
         except (KeyError, OSError, ValueError, GoofishAPIError, json.JSONDecodeError) as exc:

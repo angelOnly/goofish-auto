@@ -64,6 +64,16 @@
       "orderby": "date",
       "order": "desc"
     },
+    "goofish_market": {
+      "enabled": true,
+      "base_url": "https://goofish.xiaolicloud.cn:18443",
+      "result_keywords": ["AI课程"],
+      "limit": 100,
+      "max_files": 3,
+      "sort_by": "crawl_time",
+      "sort_order": "desc",
+      "include_hidden": false
+    },
     "output_limit": 20,
     "rights_confirmed": false,
     "authorized_assets": false,
