@@ -15,6 +15,11 @@ _delivery_payload = server._delivery_payload
 
 
 class ServerTests(unittest.TestCase):
+    def test_dashboard_script_is_served_as_a_same_origin_resource(self):
+        self.assertIn('<script src="/static/dashboard.js" defer></script>', server.HTML)
+        self.assertNotIn("refreshAll();", server.HTML)
+        self.assertIn("refreshAll();", server.DASHBOARD_JS)
+
     def test_clean_error_message_summarizes_gateway_html(self):
         message = server._clean_error_message("<html><title>504 Gateway Time-out</title><body>openresty</body></html>")
         self.assertIn("504", message)

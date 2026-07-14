@@ -826,6 +826,17 @@ refreshAll();
 </body>
 </html>"""
 
+# Keep the dashboard logic in a same-origin external resource. Some reverse
+# proxies allow styles but block inline scripts, which leaves the shell visible
+# while none of its data-loading code runs.
+_HTML_BEFORE_SCRIPT, _SCRIPT_OPEN, _HTML_AFTER_SCRIPT_OPEN = HTML.partition("<script>")
+if not _SCRIPT_OPEN:
+    raise RuntimeError("dashboard script tag is missing")
+DASHBOARD_JS, _SCRIPT_CLOSE, _HTML_AFTER_SCRIPT = _HTML_AFTER_SCRIPT_OPEN.partition("</script>")
+if not _SCRIPT_CLOSE:
+    raise RuntimeError("dashboard script closing tag is missing")
+HTML = f'{_HTML_BEFORE_SCRIPT}<script src="/static/dashboard.js" defer></script>{_HTML_AFTER_SCRIPT}'
+
 
 def _goofish_base_url() -> str:
     return os.getenv("GOOFISH_API_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
@@ -1202,6 +1213,8 @@ class Handler(BaseHTTPRequestHandler):
             path = parsed.path
             if path in {"/", "/published"}:
                 self._send(200, HTML, "text/html; charset=utf-8")
+            elif path == "/static/dashboard.js":
+                self._send(200, DASHBOARD_JS, "application/javascript; charset=utf-8")
             elif path == "/api/health":
                 self._send(200, {"ok": True, "output_dir": str(OUTPUT_DIR)})
             elif path in {"/api/tasks", "/api/local/tasks"}:
