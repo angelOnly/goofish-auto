@@ -23,6 +23,9 @@ extract_member_download_context = pipeline.extract_member_download_context
 selection_db_path = pipeline.selection_db_path
 set_course_published = pipeline.set_course_published
 validate_member_cookie = pipeline.validate_member_cookie
+apply_content_rules = pipeline.apply_content_rules
+save_content_rules = pipeline.save_content_rules
+load_content_rules = pipeline.load_content_rules
 
 
 class PipelineTests(unittest.TestCase):
@@ -42,6 +45,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(strip_html("<p>Hello <b>world</b></p>"), "Hello world")
         self.assertEqual(parse_metric("3.13K"), 3130)
         self.assertEqual(parse_metric("1.2M"), 1200000)
+
+    def test_content_rules_replace_forbidden_words(self):
+        rules = {"forbidden_words": ["chatgpt", "gpt"], "replacement": "AI工具"}
+        text = apply_content_rules("ChatGPT 和 GPT-4 实战课", rules)
+        self.assertEqual(text, "AI工具 和 AI工具-4 实战课")
+        self.assertNotRegex(text.lower(), r"chatgpt|gpt")
+
+    def test_content_rules_save_accepts_textarea_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "content_rules.json"
+            saved = save_content_rules({"forbidden_words": "chatgpt\ngpt，OpenAI", "replacement": "AI工具"}, path)
+            loaded = load_content_rules(path)
+        self.assertEqual(saved["forbidden_words"], ["chatgpt", "gpt", "OpenAI"])
+        self.assertEqual(loaded["replacement"], "AI工具")
 
     def test_parse_post_extracts_cover_and_categories(self):
         raw = {

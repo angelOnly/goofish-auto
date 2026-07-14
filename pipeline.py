@@ -32,9 +32,11 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "output"
 TASKS_FILE = ROOT / "tasks.json"
 ENV_FILE = ROOT / ".env"
+CONTENT_RULES_FILE = OUTPUT_DIR / "content_rules.json"
 USER_AGENT = "XinliResourcePipeline/0.1 (local review; respects robots.txt)"
 LOGGER = logging.getLogger("goofish_auto.pipeline")
 LOCAL_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
+DEFAULT_CONTENT_RULES = {"forbidden_words": ["chatgpt", "gpt"], "replacement": "AI工具"}
 GENERIC_MARKET_TERMS = {
     "ai",
     "人工智能",
@@ -56,6 +58,60 @@ def utc_now() -> datetime:
 
 def local_now() -> datetime:
     return datetime.now(LOCAL_TIMEZONE)
+
+
+def _normalise_forbidden_words(values: Iterable[Any]) -> List[str]:
+    words: List[str] = []
+    seen: set[str] = set()
+    raw_values: Iterable[Any] = [values] if isinstance(values, str) else values
+    for value in raw_values:
+        for part in re.split(r"[\n,，;；]+", str(value or "")):
+            word = part.strip()
+            key = word.lower()
+            if word and key not in seen:
+                seen.add(key)
+                words.append(word)
+    return words
+
+
+def load_content_rules(path: Path = CONTENT_RULES_FILE) -> Dict[str, Any]:
+    rules = dict(DEFAULT_CONTENT_RULES)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = {}
+        if isinstance(data, dict):
+            rules.update(data)
+    rules["forbidden_words"] = _normalise_forbidden_words(rules.get("forbidden_words") or [])
+    if not rules["forbidden_words"]:
+        rules["forbidden_words"] = list(DEFAULT_CONTENT_RULES["forbidden_words"])
+    rules["replacement"] = str(rules.get("replacement", DEFAULT_CONTENT_RULES["replacement"]))
+    return rules
+
+
+def save_content_rules(rules: Dict[str, Any], path: Path = CONTENT_RULES_FILE) -> Dict[str, Any]:
+    forbidden_words = _normalise_forbidden_words(rules.get("forbidden_words") or [])
+    replacement = str(rules.get("replacement", DEFAULT_CONTENT_RULES["replacement"]))
+    if not forbidden_words:
+        raise ValueError("禁用词不能为空")
+    for word in forbidden_words:
+        if replacement and re.search(re.escape(word), replacement, re.IGNORECASE):
+            raise ValueError("替换词不能包含禁用词")
+    value = {"forbidden_words": forbidden_words, "replacement": replacement}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    return value
+
+
+def apply_content_rules(text: str, rules: Optional[Dict[str, Any]] = None) -> str:
+    value = str(text or "")
+    rules = rules or load_content_rules()
+    words = _normalise_forbidden_words(rules.get("forbidden_words") or [])
+    replacement = str(rules.get("replacement", ""))
+    for word in sorted(words, key=len, reverse=True):
+        value = re.sub(re.escape(word), replacement, value, flags=re.IGNORECASE)
+    return value
 
 
 class TextExtractor(HTMLParser):
@@ -1108,7 +1164,7 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
             "该信息仅用于判断需求，不代表可直接发布或交付第三方内容。\n\n"
         )
 
-    return (
+    copy = (
         f"{title}\n"
         + f"{tags}\n\n"
         + "【核心价值】\n"
@@ -1129,6 +1185,7 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
         + "交付方式：审核通过后填写你自己的授权百度网盘链接\n"
         + "温馨提示：数字资料非实物，拍下前请确认内容清单、文件格式和售后规则。"
     )
+    return apply_content_rules(copy)
 
 
 def ai_copy_config() -> Dict[str, str]:
@@ -1153,6 +1210,9 @@ def maybe_ai_copy(item: Dict[str, Any], task: Dict[str, Any]) -> Optional[str]:
         return None
     member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else {}
     delivery_ready = bool(task.get("rights_confirmed") and member_delivery.get("links"))
+    content_rules = load_content_rules()
+    forbidden_words = content_rules.get("forbidden_words") or []
+    replacement = str(content_rules.get("replacement") or "")
     prompt = (
         "你是闲鱼数字课程商品文案编辑。请根据下面的课程元数据写一版可直接复制到闲鱼的中文商品文案。"
         "要求：\n"
@@ -1162,6 +1222,7 @@ def maybe_ai_copy(item: Dict[str, Any], task: Dict[str, Any]) -> Optional[str]:
         "4. 输出结构固定为：标题、正文、适合人群、交付说明、注意事项、标签。\n"
         "5. 如果 delivery_ready=false，只能写“拍下前先确认内容清单”，不要写自动发货或网盘已备好。\n"
         "6. 如果 delivery_ready=true，可以写“拍下后发送百度网盘链接和提取码”。\n"
+        f"7. 商品文案禁止出现这些词：{', '.join(str(word) for word in forbidden_words)}；如需表达，用“{replacement}”替代。\n"
         + json.dumps(
             {
                 "title": item.get("title"),
@@ -1199,7 +1260,7 @@ def maybe_ai_copy(item: Dict[str, Any], task: Dict[str, Any]) -> Optional[str]:
         )
         with urlopen(request, timeout=90) as response:
             data = json.loads(response.read().decode("utf-8", errors="replace"))
-        return str(data["choices"][0]["message"]["content"]).strip()
+        return apply_content_rules(str(data["choices"][0]["message"]["content"]).strip(), content_rules)
     except (HTTPError, URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError):
         return None
 
@@ -1616,6 +1677,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             member_delivery = fetch_member_delivery(item, task, member_delivery_last_request)
             if member_delivery is not None:
                 item["member_delivery"] = member_delivery
+        if item.get("copy"):
+            item["copy"] = apply_content_rules(str(item["copy"]))
         item["selection_status"] = selection_statuses.get(course_id, item.get("selection_status") or {"published": False})
         enriched_items.append(item)
     items = enriched_items

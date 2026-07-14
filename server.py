@@ -28,9 +28,12 @@ try:
     )
     from .pipeline import (
         OUTPUT_DIR,
+        apply_content_rules,
         get_selection_statuses,
+        load_content_rules,
         load_tasks,
         run_named_task,
+        save_content_rules,
         selection_db_path,
         set_course_published,
         template_copy,
@@ -39,9 +42,12 @@ except ImportError:  # direct invocation from the project root
     from goofish_tasks import DEFAULT_BASE_URL, GoofishAPIError, GoofishClient, create_from_specs, load_specs
     from pipeline import (
         OUTPUT_DIR,
+        apply_content_rules,
         get_selection_statuses,
+        load_content_rules,
         load_tasks,
         run_named_task,
+        save_content_rules,
         selection_db_path,
         set_course_published,
         template_copy,
@@ -113,6 +119,15 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
         <button id="runBtn">运行一次</button>
       </div>
       <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI虚拟课程选品整理”任务；本地资源池不按发布时间硬过滤，会按课程/教程/资料/项目实战类内容筛选，并排除远程安装、账号卡密和实体商品。下面的“闲鱼热点监控”分成新品监控和热度监控两条轨道。</div>
+      <details class="help">
+        <summary><strong>文案禁用词配置</strong></summary>
+        <p class="tiny">生成、展示、复制闲鱼文案时都会替换这些词；一行一个或用逗号分隔。</p>
+        <textarea id="forbiddenWords" rows="3" style="width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:10px;font:inherit"></textarea>
+        <div class="row">
+          <label>替换成 <input id="forbiddenReplacement" type="text" style="min-width:160px"></label>
+          <button class="secondary mini" id="saveContentRulesBtn">保存禁用词</button>
+        </div>
+      </details>
       <div id="localStatus" class="status"></div>
       <div id="runs"></div>
     </div>
@@ -335,6 +350,29 @@ async function loadHealth(){
 async function loadLocalTasks(){
   const tasks = await api('/api/local/tasks');
   $('localTask').innerHTML = tasks.map(t => `<option>${esc(t.name)}</option>`).join('');
+}
+async function loadContentRules(){
+  const rules = await api('/api/local/content-rules');
+  $('forbiddenWords').value = (rules.forbidden_words || []).join('\n');
+  $('forbiddenReplacement').value = rules.replacement ?? '';
+}
+async function saveContentRulesFromPage(){
+  const words = $('forbiddenWords').value;
+  const replacement = $('forbiddenReplacement').value;
+  setStatus('localStatus','正在保存禁用词配置...');
+  try{
+    const rules = await api('/api/local/content-rules',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({forbidden_words:words, replacement})
+    });
+    $('forbiddenWords').value = (rules.forbidden_words || []).join('\n');
+    $('forbiddenReplacement').value = rules.replacement ?? '';
+    setStatus('localStatus','禁用词配置已保存；后续生成和复制文案都会自动替换。','ok');
+    await loadPublishedItems(publishedPage);
+  }catch(e){
+    setStatus('localStatus', e.message, 'bad');
+  }
 }
 async function loadRuns(page=runsPage){
   runsPage = Math.max(1, Number(page || 1));
@@ -738,7 +776,7 @@ async function togglePublished(courseId, published){
   }catch(e){ setStatus('localStatus', e.message, 'bad'); }
 }
 async function refreshAll(){
-  await Promise.allSettled([loadHealth(), loadConfig(), loadLocalTasks(), loadRuns(), loadGoofishTasks(), loadPublishedItems()]);
+  await Promise.allSettled([loadHealth(), loadConfig(), loadLocalTasks(), loadContentRules(), loadRuns(), loadGoofishTasks(), loadPublishedItems()]);
 }
 
 document.addEventListener('click', (event) => {
@@ -749,6 +787,7 @@ document.addEventListener('click', (event) => {
   else if(target.id === 'loadGoofishBtn') loadGoofishTasks();
   else if(target.id === 'previewBootstrapBtn') previewBootstrap();
   else if(target.id === 'startBootstrapBtn') startBootstrap();
+  else if(target.id === 'saveContentRulesBtn') saveContentRulesFromPage();
   else if(target.id === 'openTasksBtn') openUrl(goofishUrls.tasks_url);
   else if(target.id === 'openResultsBtn' || target.classList.contains('js-open-results')) openUrl(goofishUrls.results_url);
   else if(target.id === 'openPublishedBtn') $('publishedPanel').scrollIntoView({behavior:'smooth', block:'start'});
@@ -948,7 +987,7 @@ def _published_item_payload(row: sqlite3.Row) -> dict[str, object]:
     }
     rights_confirmed = item.get("rights_review") == "confirmed"
     copy_suggested = template_copy(item, {"rights_confirmed": rights_confirmed}) if item else ""
-    copy_display = str(item.get("copy") or copy_suggested or "")
+    copy_display = apply_content_rules(str(item.get("copy") or copy_suggested or ""))
     delivery_payload, delivery_status_text = _delivery_payload(item)
     return {
         "id": course_id,
@@ -1103,7 +1142,7 @@ def _read_output_item(folder: str) -> dict[str, object]:
         item["selection_status"] = statuses.get(str(item["id"]), item.get("selection_status") or {"published": False})
     rights_confirmed = item.get("rights_review") == "confirmed"
     copy_suggested = template_copy(item, {"rights_confirmed": rights_confirmed}) if item else ""
-    copy_text = copy_path.read_text(encoding="utf-8") if copy_path.exists() else ""
+    copy_text = apply_content_rules(copy_path.read_text(encoding="utf-8")) if copy_path.exists() else ""
     copy_display = copy_text or copy_suggested
     delivery_payload, delivery_status_text = _delivery_payload(item)
     return {
@@ -1167,6 +1206,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "output_dir": str(OUTPUT_DIR)})
             elif path in {"/api/tasks", "/api/local/tasks"}:
                 self._send(200, load_tasks())
+            elif path == "/api/local/content-rules":
+                self._send(200, load_content_rules())
             elif path in {"/api/runs", "/api/local/runs"}:
                 query = parse_qs(parsed.query)
                 page_text = (query.get("page") or ["1"])[0]
@@ -1273,6 +1314,9 @@ class Handler(BaseHTTPRequestHandler):
                     str(body.get("course_id") or ""),
                     str(body.get("delivery_payload") or ""),
                 )
+                self._send(200, result)
+            elif path == "/api/local/content-rules":
+                result = save_content_rules(body)
                 self._send(200, result)
             else:
                 self._send(404, {"error": "not found"})

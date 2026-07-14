@@ -305,10 +305,27 @@ class ServerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(server, "OUTPUT_DIR", output_dir):
+            original_filter = server.apply_content_rules
+            fixed_filter = lambda value: original_filter(value, {"forbidden_words": ["chatgpt", "gpt"], "replacement": "AI工具"})
+            with patch.object(server, "OUTPUT_DIR", output_dir), patch.object(server, "apply_content_rules", fixed_filter):
                 data = server._read_output_item("run/01-item")
             self.assertEqual(data["copy_display"], "AI 文案正文")
             self.assertEqual(data["copy_source"], "ai")
+
+    def test_read_output_item_applies_content_rules_to_old_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            item_dir = output_dir / "run" / "01-item"
+            item_dir.mkdir(parents=True)
+            (item_dir / "copy.md").write_text("ChatGPT 和 GPT 课程文案", encoding="utf-8")
+            (item_dir / "delivery.md").write_text("delivery", encoding="utf-8")
+            (item_dir / "item.json").write_text(
+                json.dumps({"title": "测试课程", "rights_review": "confirmed"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with patch.object(server, "OUTPUT_DIR", output_dir):
+                data = server._read_output_item("run/01-item")
+            self.assertNotRegex(data["copy_display"].lower(), r"chatgpt|gpt")
 
 
 if __name__ == "__main__":
