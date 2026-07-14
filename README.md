@@ -115,3 +115,10 @@ docker compose down
 - `zero_reason`：输出 0 条时的直接原因。
 
 `goofish-bootstrap` 默认会创建不存在的任务并启动新任务；重复执行会按任务名跳过已有任务。若只想查看提交内容，可在宿主机执行 `python .\cli.py goofish-create --dry-run`，避免误调用远端 API。远端已经存在的旧重复任务不会被自动删除或停止，需要在 Web 控制台或闲鱼监控后台里手动处理。
+
+
+### Baidu Netdisk detail screenshots
+
+When `source_config.capture_delivery_screenshots=true`, the pipeline opens the first detected Baidu share link with headless Chromium after rights are confirmed, fills a detected extraction code when possible, and saves 1-3 viewport screenshots at the top/middle/bottom of the page. It never downloads course files. A screenshot failure does not block selection; status and the error are stored in `item.json` and run diagnostics. The default task requests three screenshots.
+
+Install the runtime with `pip install -r requirements.txt` and `playwright install chromium`; Docker installs Chromium during image build. Images are saved under each run's `assets/` directory and are shown in the dashboard item details. Enable this only for content you are legally allowed to view and redistribute.

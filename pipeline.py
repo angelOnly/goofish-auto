@@ -1178,6 +1178,89 @@ def download_authorized_cover(item: Dict[str, Any], task: Dict[str, Any], asset_
     return str(path.relative_to(asset_dir.parent.parent)).replace("\\", "/")
 
 
+def _delivery_screenshot_config(task: Dict[str, Any]) -> tuple[bool, int, int]:
+    source_config = task.get("source_config") or {}
+    enabled = bool(source_config.get("capture_delivery_screenshots", task.get("capture_delivery_screenshots", False)))
+    try:
+        count = int(source_config.get("delivery_screenshot_count", task.get("delivery_screenshot_count", 3)))
+    except (TypeError, ValueError):
+        count = 3
+    try:
+        timeout = int(source_config.get("delivery_screenshot_timeout", task.get("delivery_screenshot_timeout", 30)))
+    except (TypeError, ValueError):
+        timeout = 30
+    return enabled, max(1, min(count, 3)), max(5, min(timeout, 120))
+
+
+def capture_baidu_delivery_screenshots(item: Dict[str, Any], task: Dict[str, Any], asset_dir: Path) -> Dict[str, Any]:
+    """Capture 1\u20133 viewport screenshots from an authorized Baidu share page."""
+    enabled, count, timeout = _delivery_screenshot_config(task)
+    if not enabled:
+        return {"status": "disabled", "paths": [], "url": "", "count": 0}
+    if not task.get("rights_confirmed"):
+        return {"status": "skipped_rights_unconfirmed", "paths": [], "url": "", "count": 0, "message": "\u672a\u786e\u8ba4\u5206\u53d1\u6743\uff0c\u5df2\u8df3\u8fc7\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe\u3002"}
+    member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else {}
+    links = [str(value).strip() for value in member_delivery.get("links", []) if str(value).strip()]
+    if not links:
+        links = [str(value).strip() for value in item.get("delivery_links", []) if str(value).strip()]
+    links = [link for link in links if "pan.baidu.com" in link.lower()]
+    if not links:
+        return {"status": "no_link", "paths": [], "url": "", "count": 0, "message": "\u6ca1\u6709\u53ef\u6253\u5f00\u7684\u767e\u5ea6\u7f51\u76d8\u94fe\u63a5\u3002"}
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return {"status": "unavailable", "paths": [], "url": links[0], "count": 0, "message": "\u672a\u5b89\u88c5 Playwright\uff1b\u8bf7\u5b89\u88c5\u4f9d\u8d56\u5e76\u6267\u884c playwright install chromium\u3002"}
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    url = links[0]
+    paths: List[str] = []
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1440, "height": 900}, locale="zh-CN", ignore_https_errors=True)
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=min(timeout * 1000, 10_000))
+            except PlaywrightTimeoutError:
+                pass
+            passwords = [str(value).strip() for value in member_delivery.get("passwords", []) if str(value).strip()]
+            if passwords:
+                for selector in ("input[placeholder*='\u63d0\u53d6\u7801']", "input[placeholder*='\u5bc6\u7801']", "input[aria-label*='\u63d0\u53d6\u7801']", "input[name='pwd']", "#accessCode"):
+                    locator = page.locator(selector).first
+                    try:
+                        if locator.is_visible(timeout=500):
+                            locator.fill(passwords[0])
+                            for button_selector in ("button:has-text('\u63d0\u53d6')", "button:has-text('\u786e\u5b9a')", "input[type='button']"):
+                                button = page.locator(button_selector).first
+                                if button.is_visible(timeout=500):
+                                    button.click(timeout=1000)
+                                    break
+                            page.wait_for_timeout(800)
+                            break
+                    except Exception:
+                        continue
+            page.wait_for_timeout(800)
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(300)
+            scroll_height = int(page.evaluate("document.body ? document.body.scrollHeight : 0") or 0)
+            viewport_height = int(page.evaluate("window.innerHeight || 900") or 900)
+            max_scroll = max(0, scroll_height - viewport_height)
+            positions = [round(max_scroll * index / max(1, count - 1)) for index in range(count)]
+            for index, position in enumerate(positions, start=1):
+                page.evaluate("y => window.scrollTo(0, y)", position)
+                page.wait_for_timeout(350)
+                screenshot_path = asset_dir / f"delivery-screenshot-{index}.png"
+                page.screenshot(path=str(screenshot_path), full_page=False)
+                paths.append(str(screenshot_path.relative_to(asset_dir.parent.parent)).replace("\\", "/"))
+            final_url = page.url
+            context.close()
+            browser.close()
+        return {"status": "found", "paths": paths, "url": final_url, "count": len(paths)}
+    except Exception as exc:
+        LOGGER.exception("delivery screenshot failed course_id=%s", item.get("id"))
+        return {"status": "error", "paths": paths, "url": url, "count": len(paths), "message": str(exc)}
+
 def fetch_member_delivery(
     item: Dict[str, Any],
     task: Dict[str, Any],
@@ -1853,6 +1936,9 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             member_delivery = fetch_member_delivery(item, task, member_delivery_last_request)
             if member_delivery is not None:
                 item["member_delivery"] = member_delivery
+        screenshot_enabled, _, _ = _delivery_screenshot_config(task)
+        if screenshot_enabled and not (item.get("delivery_screenshots") or {}).get("paths"):
+            item["delivery_screenshots"] = capture_baidu_delivery_screenshots(item, task, asset_dir)
         if item.get("copy"):
             item["copy"] = apply_content_rules(str(item["copy"]))
         item["selection_status"] = selection_statuses.get(course_id, item.get("selection_status") or {"published": False})
@@ -1864,12 +1950,24 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         for item in items
         if isinstance(item.get("member_delivery"), dict) and item["member_delivery"].get("links")
     )
+    diagnostics["delivery_screenshot_item_count"] = sum(
+        1 for item in items if (item.get("delivery_screenshots") or {}).get("paths")
+    )
+    diagnostics["delivery_screenshot_count"] = sum(
+        len((item.get("delivery_screenshots") or {}).get("paths") or []) for item in items
+    )
+    diagnostics["delivery_screenshot_error_count"] = sum(
+        1 for item in items if (item.get("delivery_screenshots") or {}).get("status") in {"error", "unavailable"}
+    )
     diagnostics["ai_copy_count"] = sum(1 for item in items if item.get("copy_source") == "ai")
     diagnostics["ai_model"] = ai_copy_config()["model"] if ai_copy_configured() else ""
     note(
         "items_enriched",
         reused_unpublished_count=diagnostics["reused_unpublished_count"],
         member_delivery_found_count=diagnostics["member_delivery_found_count"],
+        delivery_screenshot_item_count=diagnostics["delivery_screenshot_item_count"],
+        delivery_screenshot_count=diagnostics["delivery_screenshot_count"],
+        delivery_screenshot_error_count=diagnostics["delivery_screenshot_error_count"],
         ai_copy_count=diagnostics["ai_copy_count"],
         ai_model=diagnostics["ai_model"],
     )
@@ -1894,7 +1992,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             f"{delivery_links}\n\n"
             "图片信息：\n"
             f"{cover_info}\n"
-            "- 上架建议：使用你自己有权使用的封面图、课程目录长图或重新制作的说明图；公开来源图不要直接当作可商用素材。\n\n"
+            + ("- " + "\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe" + "\uFF1A\n" + "\n".join(f"  - {path}" for path in ((item.get("delivery_screenshots") or {}).get("paths") or [])) + "\n" if (item.get("delivery_screenshots") or {}).get("paths") else "- " + "\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe" + "\uFF1A\u672a\u751f\u6210\n")
+            + "- 上架建议：使用你自己有权使用的封面图、课程目录长图或重新制作的说明图；公开来源图不要直接当作可商用素材。\n\n"
             "原始页面（仅作来源核验）：\n"
             f"- {item.get('page_url') or ''}\n"
         )
@@ -1935,6 +2034,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
                 "market_price_max": item.get("market_price_max"),
                 "selection_status": item.get("selection_status", {"published": False}),
                 "matched_keywords": item.get("matched_keywords", []),
+                "delivery_screenshots": item.get("delivery_screenshots", {"status": "disabled", "paths": [], "count": 0}),
                 "page_url": item["page_url"],
                 "folder": str((run_dir / f"{index:02d}-{safe_slug(item['title'])}").relative_to(output_dir)).replace("\\", "/"),
             }

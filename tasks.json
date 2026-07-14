@@ -85,12 +85,20 @@
       "member_cookie_env": "THEITZY_COOKIE",
       "member_request_interval_seconds": 10,
       "orderby": "date",
-      "order": "desc"
+      "order": "desc",
+      "capture_delivery_screenshots": true,
+      "delivery_screenshot_count": 3,
+      "delivery_screenshot_timeout": 45
     },
     "goofish_market": {
       "enabled": true,
       "base_url": "https://goofish.xiaolicloud.cn:18443",
-      "result_keywords": ["AI课程", "AI教程", "AI视频", "AI视频教程"],
+      "result_keywords": [
+        "AI课程",
+        "AI教程",
+        "AI视频",
+        "AI视频教程"
+      ],
       "limit": 100,
       "result_pages": 3,
       "max_files": 3,

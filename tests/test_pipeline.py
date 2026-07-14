@@ -140,6 +140,20 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("禁止发布", (item_dir / "delivery.md").read_text(encoding="utf-8"))
             self.assertEqual(json.loads((item_dir / "item.json").read_text(encoding="utf-8"))["rights_review"], "required")
 
+    def test_delivery_screenshot_config_clamps_count(self):
+        self.assertEqual(
+            pipeline._delivery_screenshot_config({"source_config": {"capture_delivery_screenshots": True, "delivery_screenshot_count": 9, "delivery_screenshot_timeout": 999}}),
+            (True, 3, 120),
+        )
+
+    def test_delivery_screenshot_skips_without_rights(self):
+        result = pipeline.capture_baidu_delivery_screenshots(
+            {"member_delivery": {"links": ["https://pan.baidu.com/s/mock"]}},
+            {"rights_confirmed": False, "source_config": {"capture_delivery_screenshots": True}},
+            Path("output"),
+        )
+        self.assertEqual(result["status"], "skipped_rights_unconfirmed")
+
     def test_member_delivery_is_written_when_authorized_and_cookie_is_available(self):
         task = {
             "name": "会员链接测试",

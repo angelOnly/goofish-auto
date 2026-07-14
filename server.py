@@ -275,10 +275,12 @@ function renderDiagnostics(data){
   const market = d.market_enabled ? `；闲鱼市场样本 ${esc(d.market_signal_count ?? 0)} 条` : '';
   const reused = d.reused_unpublished_count ? `；复用未发布缓存 ${esc(d.reused_unpublished_count)} 条` : '';
   const memberDelivery = d.member_delivery_found_count ? `；会员网盘链接 ${esc(d.member_delivery_found_count)} 条` : '';
+  const screenshots = d.delivery_screenshot_count ? `; delivery screenshots ${esc(d.delivery_screenshot_count)}` : '';
+  const screenshotErrors = d.delivery_screenshot_error_count ? `; screenshot failures ${esc(d.delivery_screenshot_error_count)}` : '';
   const cookieValid = d.member_cookie_validated ? '；会员 Cookie 已校验' : '';
   const aiCopy = d.ai_model ? `；AI文案 ${esc(d.ai_copy_count ?? 0)} 条（${esc(d.ai_model)}）` : '';
   const marketError = d.market_error ? `<p class="warn">闲鱼市场信号读取失败：${esc(d.market_error)}</p>` : '';
-  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}${aiCopy}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}${screenshots}${screenshotErrors}${aiCopy}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
 }
 function detailRowFor(folder){
   return [...document.querySelectorAll('.inline-detail-row')].find(row => row.dataset.detailFor === folder);
@@ -525,12 +527,17 @@ function previewPublishedItem(index, editDelivery=false){
   const sourceHtml = item.page_url
     ? `<h3>来源核验</h3><p><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">${esc(item.page_url)}</a></p>`
     : '';
+  const screenshotPaths = item.delivery_screenshots?.paths || item.item?.delivery_screenshots?.paths || [];
+  const screenshotHtml = screenshotPaths.length
+    ? `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><div class="image-preview-row">${screenshotPaths.map((path, index) => { const src = `/api/local/asset?path=${encodeURIComponent(path)}`; return `<a class="thumb-link" href="${src}" target="_blank" rel="noreferrer"><img class="cover-preview" src="${src}" alt="\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe${index + 1}" loading="lazy"></a>`; }).join('')}</div></div>`
+    : '';
   const html =
     `<div class="inline-copy-panel"><h3>已发布商品</h3><p><strong>${esc(item.title)}</strong><br><small>${esc(item.published_at || '')}</small></p>` +
     deliveryHtml +
     editorHtml +
     `<h3>完整闲鱼文案 ${copySourceLabel(item.copy_source)}</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_display">复制文案</button></div><pre>${esc(item.copy_display || '')}</pre>` +
     sourceHtml +
+    screenshotHtml +
     `</div>`;
   const detailRow = publishedDetailRowFor(index);
   if(detailRow){
@@ -608,6 +615,10 @@ async function showItem(folder){
   const data = await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
   currentItem = data;
   const copyText = data.copy_display || data.copy || data.copy_suggested;
+  const screenshotPaths = data.delivery_screenshots?.paths || data.item?.delivery_screenshots?.paths || [];
+  const screenshotHtml = screenshotPaths.length
+    ? `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><p class="tiny">Saved ${screenshotPaths.length} screenshot(s); click to inspect or save the original.</p><div class="image-preview-row">${screenshotPaths.map((path, index) => { const src = `/api/local/asset?path=${encodeURIComponent(path)}`; return `<a class="thumb-link" href="${src}" target="_blank" rel="noreferrer"><img class="cover-preview" src="${src}" alt="\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe${index + 1}" loading="lazy"></a>`; }).join('')}</div></div>`
+    : '';
   expandedFolder = folder;
   if(detailRow){
     const imagePreview = data.cover_url
@@ -653,6 +664,7 @@ async function showItem(folder){
         <pre class="copy-preview">${esc(copyText)}</pre>
         ${sourceHtml}
         ${imagePreview}
+        ${screenshotHtml}
         ${marketHtml}
       </div>`;
   }
@@ -661,6 +673,10 @@ async function showFullItem(folder){
   const data = currentItem?.folder === folder ? currentItem : await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
   currentItem = data;
   const copyText = data.copy_display || data.copy || data.copy_suggested;
+  const screenshotPaths = data.delivery_screenshots?.paths || data.item?.delivery_screenshots?.paths || [];
+  const screenshotHtml = screenshotPaths.length
+    ? `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><p class="tiny">Saved ${screenshotPaths.length} screenshot(s); click to inspect or save the original.</p><div class="image-preview-row">${screenshotPaths.map((path, index) => { const src = `/api/local/asset?path=${encodeURIComponent(path)}`; return `<a class="thumb-link" href="${src}" target="_blank" rel="noreferrer"><img class="cover-preview" src="${src}" alt="\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe${index + 1}" loading="lazy"></a>`; }).join('')}</div></div>`
+    : '';
   const imageHtml = data.cover_url
     ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">小图只是预览，图片源是原图。点图可新标签打开原图；手机上长按图片可保存原图。</p><a class="thumb-link" target="_blank" rel="noreferrer" href="${esc(data.cover_url)}"><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览" loading="lazy"></a></div>`
     : `<div class="image-box"><h3>图片信息</h3><p class="muted">这个条目没有公开封面地址。正式上架时建议补一张自有/授权封面图或目录图。</p></div>`;
@@ -671,6 +687,7 @@ async function showFullItem(folder){
     ? `<h3>发货内容</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery_payload">复制发货</button></div><pre>${esc(data.delivery_payload)}</pre>`
     : `<h3>发货内容</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="delivery_payload">复制发货</button></div><p class="warn">${esc(data.delivery_status_text || '未获取百度网盘链接')}</p>`;
   $('itemDetail').innerHTML = imageHtml +
+    screenshotHtml +
     sourceHtml +
     deliveryPayloadHtml +
     `<h3>完整闲鱼文案 ${copySourceLabel(data.copy_source)}</h3><div class="copy-actions"><button class="secondary mini js-copy-field" data-field="copy_display">复制文案</button></div><pre>${esc(copyText)}</pre>` +
@@ -1013,6 +1030,7 @@ def _published_item_payload(row: sqlite3.Row) -> dict[str, object]:
         "delivery_payload": delivery_payload,
         "delivery_status_text": delivery_status_text,
         "cover_url": item.get("cover_url", ""),
+        "delivery_screenshots": item.get("delivery_screenshots", {"status": "disabled", "paths": [], "count": 0}),
         "item": item,
     }
 
@@ -1167,6 +1185,7 @@ def _read_output_item(folder: str) -> dict[str, object]:
         "delivery_status_text": delivery_status_text,
         "cover_url": item.get("cover_url", ""),
         "cover_local_path": item.get("cover_local_path", ""),
+        "delivery_screenshots": item.get("delivery_screenshots", {"status": "disabled", "paths": [], "count": 0}),
         "page_url": item.get("page_url", ""),
         "title": item.get("title", ""),
         "item": item,
@@ -1188,7 +1207,12 @@ def _enrich_summary_selection_status(summary: dict[str, object]) -> dict[str, ob
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, data: object, content_type: str = "application/json; charset=utf-8") -> None:
-        payload = data.encode("utf-8") if isinstance(data, str) else json.dumps(data, ensure_ascii=False).encode("utf-8")
+        if isinstance(data, bytes):
+            payload = data
+        elif isinstance(data, str):
+            payload = data.encode("utf-8")
+        else:
+            payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -1215,6 +1239,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, HTML, "text/html; charset=utf-8")
             elif path == "/static/dashboard.js":
                 self._send(200, DASHBOARD_JS, "application/javascript; charset=utf-8")
+            elif path == "/api/local/asset":
+                relative = (parse_qs(parsed.query).get("path") or [""])[0]
+                asset_path = _safe_output_path(relative)
+                if asset_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    raise ValueError("Only image assets are allowed")
+                if not asset_path.is_file():
+                    raise FileNotFoundError("Image asset not found")
+                content_type = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}[asset_path.suffix.lower()]
+                self._send(200, asset_path.read_bytes(), content_type)
             elif path == "/api/health":
                 self._send(200, {"ok": True, "output_dir": str(OUTPUT_DIR)})
             elif path in {"/api/tasks", "/api/local/tasks"}:
