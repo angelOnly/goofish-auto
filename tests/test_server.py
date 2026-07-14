@@ -19,6 +19,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn('<script src="/static/dashboard.js" defer></script>', server.HTML)
         self.assertNotIn("refreshAll();", server.HTML)
         self.assertIn("refreshAll();", server.DASHBOARD_JS)
+        self.assertIn("join('\\n');", server.DASHBOARD_JS)
+        self.assertNotIn("join('\n');", server.DASHBOARD_JS)
 
     def test_clean_error_message_summarizes_gateway_html(self):
         message = server._clean_error_message("<html><title>504 Gateway Time-out</title><body>openresty</body></html>")

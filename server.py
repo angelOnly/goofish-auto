@@ -353,7 +353,7 @@ async function loadLocalTasks(){
 }
 async function loadContentRules(){
   const rules = await api('/api/local/content-rules');
-  $('forbiddenWords').value = (rules.forbidden_words || []).join('\n');
+  $('forbiddenWords').value = (rules.forbidden_words || []).join('\\n');
   $('forbiddenReplacement').value = rules.replacement ?? '';
 }
 async function saveContentRulesFromPage(){
@@ -366,7 +366,7 @@ async function saveContentRulesFromPage(){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({forbidden_words:words, replacement})
     });
-    $('forbiddenWords').value = (rules.forbidden_words || []).join('\n');
+    $('forbiddenWords').value = (rules.forbidden_words || []).join('\\n');
     $('forbiddenReplacement').value = rules.replacement ?? '';
     setStatus('localStatus','禁用词配置已保存；后续生成和复制文案都会自动替换。','ok');
     await loadPublishedItems(publishedPage);
