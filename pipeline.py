@@ -527,13 +527,103 @@ def fetch_source(task: Dict[str, Any]) -> List[Dict[str, Any]]:
     raise RuntimeError(f"不支持的数据源: {source or '未填写'}")
 
 
-def score_item(item: Dict[str, Any], keywords: Iterable[str]) -> Dict[str, Any]:
-    text = item_search_text(item)
-    terms = [str(value).strip().lower() for value in keywords if str(value).strip()]
+def _normalise_term(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _term_matches_text(term: str, text: str) -> bool:
+    """Match Latin keywords as tokens while keeping natural Chinese substring matching."""
+
+    needle = _normalise_term(term)
+    haystack = _normalise_term(text)
+    if not needle:
+        return False
+    prefix = r"(?<![a-z0-9])" if re.match(r"[a-z0-9]", needle) else ""
+    suffix = r"(?![a-z0-9])" if re.search(r"[a-z0-9]$", needle) else ""
+    return re.search(f"{prefix}{re.escape(needle)}{suffix}", haystack, re.IGNORECASE) is not None
+
+
+def _matched_keyword_terms(text: str, keywords: Iterable[str]) -> List[str]:
     matched: List[str] = []
-    for term in terms:
-        if term in text and term not in matched:
+    for value in keywords:
+        term = _normalise_term(value)
+        if term and term not in matched and _term_matches_text(term, text):
             matched.append(term)
+    return matched
+
+
+def _effective_keyword_terms(matched: Iterable[str]) -> List[str]:
+    """Collapse nested concepts such as AI -> AI视频 -> AI视频教程 for scoring."""
+
+    effective: List[str] = []
+    for term in sorted({_normalise_term(value) for value in matched if _normalise_term(value)}, key=len, reverse=True):
+        if any(term != specific and term in specific for specific in effective):
+            continue
+        effective.append(term)
+    return effective
+
+
+def task_keyword_groups(task: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_groups = task.get("keyword_groups") or []
+    entries: List[tuple[str, Any]] = []
+    if isinstance(raw_groups, dict):
+        entries = [(str(name), values) for name, values in raw_groups.items()]
+    elif isinstance(raw_groups, list):
+        for raw in raw_groups:
+            if not isinstance(raw, dict):
+                continue
+            entries.append((str(raw.get("name") or ""), raw.get("keywords") or []))
+
+    groups: List[Dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for raw_name, raw_keywords in entries:
+        name = raw_name.strip()
+        if not name or name in seen_names:
+            continue
+        values = [raw_keywords] if isinstance(raw_keywords, str) else raw_keywords
+        keywords: List[str] = []
+        seen_terms: set[str] = set()
+        for value in values if isinstance(values, Iterable) else []:
+            term = str(value or "").strip()
+            key = _normalise_term(term)
+            if term and key not in seen_terms:
+                seen_terms.add(key)
+                keywords.append(term)
+        if keywords:
+            seen_names.add(name)
+            groups.append({"name": name, "keywords": keywords})
+    return groups
+
+
+def task_keywords(task: Dict[str, Any], keyword_groups: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+    groups = keyword_groups if keyword_groups is not None else task_keyword_groups(task)
+    values: List[Any] = list(task.get("keywords") or [])
+    for group in groups:
+        values.extend(group.get("keywords") or [])
+    keywords: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        term = str(value or "").strip()
+        key = _normalise_term(term)
+        if term and key not in seen:
+            seen.add(key)
+            keywords.append(term)
+    return keywords
+
+
+def score_item(
+    item: Dict[str, Any],
+    keywords: Iterable[str],
+    keyword_groups: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    text = item_search_text(item)
+    matched = _matched_keyword_terms(text, keywords)
+    effective_matches = _effective_keyword_terms(matched)
+    group_matches: Dict[str, List[str]] = {}
+    for group in keyword_groups or []:
+        terms = _matched_keyword_terms(text, group.get("keywords") or [])
+        if terms:
+            group_matches[str(group.get("name"))] = terms
     now = utc_now()
     published_at = str(item.get("published_at") or "")
     age_days = 365.0
@@ -546,12 +636,16 @@ def score_item(item: Dict[str, Any], keywords: Iterable[str]) -> Dict[str, Any]:
         except ValueError:
             pass
     freshness = max(0.0, 30.0 * math.exp(-age_days / 14.0))
-    keyword_score = min(50.0, len(matched) * 16.0)
+    keyword_score = min(50.0, 24.0 + max(0, len(effective_matches) - 1) * 8.0) if matched else 0.0
     image_bonus = 5.0 if item.get("cover_url") else 0.0
     score = round(min(100.0, keyword_score + freshness + image_bonus), 1)
     return {
         **item,
         "matched_keywords": matched,
+        "effective_matched_keywords": effective_matches,
+        "matched_keyword_groups": list(group_matches),
+        "primary_keyword_group": next(iter(group_matches), ""),
+        "keyword_group_matches": group_matches,
         "age_days": round(age_days, 2),
         "hotness_score": score,
         "hotness_reasons": [
@@ -574,11 +668,93 @@ def item_search_text(item: Dict[str, Any]) -> str:
 
 def matches_any_keyword(item: Dict[str, Any], keywords: Iterable[str]) -> bool:
     text = item_search_text(item)
-    return any(str(value).strip().lower() in text for value in keywords if str(value).strip())
+    return any(_term_matches_text(str(value), text) for value in keywords if str(value).strip())
 
 
-def _normalise_term(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+def _group_counts(items: Iterable[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        name = str(item.get("primary_keyword_group") or "其他")
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def select_candidates(
+    candidates: Iterable[Dict[str, Any]],
+    output_limit: int,
+    keyword_groups: Optional[List[Dict[str, Any]]] = None,
+    strategy: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Select a score-ordered result set with soft per-track diversity limits."""
+
+    ordered = sorted(candidates, key=lambda item: float(item.get("hotness_score", 0.0)), reverse=True)
+    limit = max(0, int(output_limit))
+    config = strategy or {}
+    if not ordered or limit == 0:
+        return []
+    if str(config.get("mode") or "").lower() != "balanced" or not keyword_groups:
+        return ordered[:limit]
+
+    try:
+        min_per_group = max(0, min(int(config.get("min_per_group", 1)), limit))
+    except (TypeError, ValueError):
+        min_per_group = 1
+    try:
+        max_per_group = max(1, min(int(config.get("max_per_group", limit)), limit))
+    except (TypeError, ValueError):
+        max_per_group = limit
+    max_per_group = max(max_per_group, min_per_group)
+
+    selected: List[Dict[str, Any]] = []
+    selected_objects: set[int] = set()
+    selected_group_counts: Dict[str, int] = {}
+
+    def add(item: Dict[str, Any]) -> bool:
+        marker = id(item)
+        if marker in selected_objects or len(selected) >= limit:
+            return False
+        selected.append(item)
+        selected_objects.add(marker)
+        name = str(item.get("primary_keyword_group") or "其他")
+        selected_group_counts[name] = selected_group_counts.get(name, 0) + 1
+        return True
+
+    group_names = [str(group.get("name") or "") for group in keyword_groups if str(group.get("name") or "")]
+    for _ in range(min_per_group):
+        for group_name in group_names:
+            item = next(
+                (
+                    value
+                    for value in ordered
+                    if id(value) not in selected_objects and value.get("primary_keyword_group") == group_name
+                ),
+                None,
+            )
+            if item is not None:
+                add(item)
+            if len(selected) >= limit:
+                break
+        if len(selected) >= limit:
+            break
+
+    # Prefer the best remaining items while a track is below its soft cap.
+    for item in ordered:
+        group_name = str(item.get("primary_keyword_group") or "其他")
+        if group_name != "其他" and selected_group_counts.get(group_name, 0) >= max_per_group:
+            continue
+        add(item)
+        if len(selected) >= limit:
+            break
+
+    # The cap is deliberately soft: never return fewer items just because only
+    # one track has enough candidates.
+    if len(selected) < limit:
+        for item in ordered:
+            add(item)
+            if len(selected) >= limit:
+                break
+
+    return sorted(selected, key=lambda item: float(item.get("hotness_score", 0.0)), reverse=True)
 
 
 def _parse_market_timestamp(value: Any) -> Optional[datetime]:
