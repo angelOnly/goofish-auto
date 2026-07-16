@@ -66,7 +66,7 @@ HTML = """<!doctype html>
 header{padding:28px 32px 10px;display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
 h1{margin:0;font-size:28px}h2{margin:0 0 16px;font-size:20px}h3{margin:18px 0 10px;font-size:16px}
 main{padding:16px 32px 32px;display:grid;gap:16px}
-.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs button{background:transparent;color:var(--muted);border-color:transparent}.tabs button.active{background:var(--blue);color:white;border-color:var(--blue)}.tab-panel{display:none}.tab-panel.active{display:block}.grid>.tab-panel.active{grid-column:1/-1}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs button{background:transparent;color:var(--muted);border-color:transparent}.tabs button.active{background:var(--blue);color:white;border-color:var(--blue)}.tab-panel:not(.active){display:none!important}.tab-panel.active{display:block}.grid>.tab-panel.active{grid-column:1/-1}
 .panel,.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px #1720330d}
 .panel{padding:18px}.card{padding:14px}.card small,.muted{color:var(--muted)}.card strong{display:block;margin-top:8px;font-size:18px}
 button,select,input{font:inherit}button,select{height:38px;border-radius:8px;border:1px solid #cbd5e1;background:white;padding:0 12px}
