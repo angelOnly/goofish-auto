@@ -96,6 +96,16 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
   #publishedResults tr:not(.inline-detail-row) td,#runDetail tr.result-row td{display:block;width:100%;border:0;padding:4px 0;white-space:normal}
   #publishedResults tr:not(.inline-detail-row) td:last-child,#runDetail tr.result-row td:last-child{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
   #runDetail tr.inline-detail-row td{display:block;width:100%}
+  #publishedResults tr:not(.inline-detail-row){display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;gap:2px 8px;align-items:center}
+  #publishedResults tr:not(.inline-detail-row) td:nth-child(1){grid-column:1/-1;grid-row:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+  #publishedResults tr:not(.inline-detail-row) td:nth-child(2){grid-column:1;grid-row:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #publishedResults tr:not(.inline-detail-row) td:nth-child(3){display:none}
+  #publishedResults tr:not(.inline-detail-row) td:nth-child(4){grid-column:2;grid-row:2;justify-content:flex-end}
+  #runDetail tr.result-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;gap:2px 8px;align-items:center}
+  #runDetail tr.result-row td:nth-child(1){grid-column:1/-1;grid-row:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+  #runDetail tr.result-row td:nth-child(2),#runDetail tr.result-row td:nth-child(3),#runDetail tr.result-row td:nth-child(4),#runDetail tr.result-row td:nth-child(6){display:none}
+  #runDetail tr.result-row td:nth-child(5){grid-column:1;grid-row:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #runDetail tr.result-row td:nth-child(7){grid-column:2;grid-row:2;justify-content:flex-end}
 }
 </style>
 </head>
@@ -106,7 +116,6 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     <button class="active" data-tab="local">本地资源</button>
     <button data-tab="goofish">闲鱼热点</button>
     <button data-tab="published">已发布</button>
-    <button class="secondary" id="refreshBtn">刷新</button>
   </nav>
 </header>
 <main>
