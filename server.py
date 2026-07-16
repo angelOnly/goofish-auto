@@ -84,7 +84,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
 .inline-detail-row td{background:#fbfdff;padding:0 8px 12px}.inline-copy-panel{border:1px solid #dbe5f0;border-radius:8px;padding:10px 12px;margin:4px 0 8px;background:white}
 .inline-copy-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}.inline-copy-head h3{margin:0;font-size:14px}.inline-copy-actions{display:flex;gap:6px;flex-wrap:wrap}
 .copy-preview{white-space:pre-wrap;word-break:break-word;line-height:1.65;color:#24324a;background:#f8fafc;border:1px solid #edf2f7;border-radius:7px;padding:10px;margin:10px 0 0;max-height:none;overflow:visible}
-.market-compact{margin-top:10px}.peer-links{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px}.peer-links a{display:inline-flex;align-items:center;border:1px solid #cbd5e1;border-radius:7px;padding:2px 7px;background:white;font-size:12px;max-width:5.5em;overflow:hidden;white-space:nowrap}
+.market-compact{margin-top:10px}.peer-links{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px}.peer-links a{display:inline-flex;align-items:center;border:1px solid #cbd5e1;border-radius:7px;padding:2px 7px;background:white;font-size:12px;max-width:5.5em;overflow:hidden;white-space:nowrap}.result-panel{border-top:1px solid var(--line);padding-top:14px;margin-top:8px}
 .publish-cell{min-width:110px}.publish-cell small{display:block;color:var(--muted);margin-top:4px}
 @media (max-width:1000px){.grid{grid-template-columns:1fr}.grid>.tab-panel.active{grid-column:1}.panel{padding:14px}header{display:block;padding:16px}main{padding:8px 12px 24px}table{display:block;overflow-x:auto;white-space:nowrap}.tabs{margin-top:12px}.tabs button{flex:1;min-width:calc(50% - 8px)}}
 </style>
@@ -96,7 +96,6 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     <button class="active" data-tab="local">本地资源</button>
     <button data-tab="goofish">闲鱼热点</button>
     <button data-tab="published">已发布</button>
-    <button data-tab="results">抓取内容</button>
     <button class="secondary" id="refreshBtn">刷新</button>
   </nav>
 </header>
@@ -121,6 +120,11 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
       </details>
       <div id="localStatus" class="status"></div>
       <div id="runs"></div>
+      <div id="resultsPanel" class="result-panel">
+        <h3>抓取内容</h3>
+        <div id="runDetail" class="muted">点击最近运行里的“查看”后，详情会显示在这里。</div>
+        <div id="itemDetail"></div>
+      </div>
     </div>
 
     <div class="panel stack tab-panel" data-tab-panel="goofish">
@@ -154,11 +158,6 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     <div id="publishedPager" class="row"></div>
   </section>
 
-  <section class="panel tab-panel" data-tab-panel="results">
-    <h2>结果详情</h2>
-    <div id="runDetail" class="muted">点击最近运行里的“查看”查看生成条目。</div>
-    <div id="itemDetail"></div>
-  </section>
 </main>
 
 <script>
@@ -437,6 +436,7 @@ async function showRun(runId){
     renderDiagnostics(data) +
     `<table><thead><tr><th>标题</th><th>热度</th><th>市场匹配</th><th>同行价</th><th>发布状态</th><th>来源</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   $('itemDetail').innerHTML = '';
+  $('resultsPanel')?.scrollIntoView({behavior:'smooth', block:'start'});
 }
 async function loadPublishedItems(page=publishedPage){
   const query = $('publishedQuery').value.trim();
