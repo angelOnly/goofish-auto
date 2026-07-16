@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
@@ -154,6 +155,90 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "skipped_rights_unconfirmed")
 
+    def test_delivery_screenshot_does_not_succeed_on_outer_share_page(self):
+        class FakeLocator:
+            def __init__(self, selector):
+                self.selector = selector
+                self.first = self
+
+            def is_visible(self, timeout=0):
+                return "input[" in self.selector or "button:" in self.selector
+
+            def fill(self, value):
+                self.value = value
+
+            def click(self, timeout=0):
+                self.clicked = True
+
+        class FakePage:
+            url = "https://pan.baidu.com/s/mock"
+
+            def goto(self, *args, **kwargs):
+                return None
+
+            def wait_for_load_state(self, *args, **kwargs):
+                return None
+
+            def locator(self, selector):
+                return FakeLocator(selector)
+
+            def wait_for_timeout(self, *args, **kwargs):
+                return None
+
+            def evaluate(self, script, *args):
+                if script.lstrip().startswith("() =>"):
+                    return {
+                        "hasPasswordInput": True,
+                        "hasDetailSelector": False,
+                        "markerHits": [],
+                        "isDetail": False,
+                        "url": self.url,
+                    }
+                return 0
+
+            def screenshot(self, *args, **kwargs):
+                raise AssertionError("outer page must never be captured")
+
+        class FakeContext:
+            def new_page(self):
+                return FakePage()
+
+            def close(self):
+                return None
+
+        class FakeBrowser:
+            def new_context(self, **kwargs):
+                return FakeContext()
+
+            def close(self):
+                return None
+
+        fake_playwright = SimpleNamespace(
+            chromium=SimpleNamespace(launch=lambda **kwargs: FakeBrowser())
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("playwright.sync_api.sync_playwright") as sync_playwright:
+                sync_playwright.return_value.__enter__.return_value = fake_playwright
+                result = pipeline.capture_baidu_delivery_screenshots(
+                    {
+                        "member_delivery": {
+                            "links": ["https://pan.baidu.com/s/mock"],
+                            "passwords": ["abcd"],
+                        }
+                    },
+                    {
+                        "rights_confirmed": True,
+                        "source_config": {
+                            "capture_delivery_screenshots": True,
+                            "delivery_screenshot_timeout": 5,
+                        },
+                    },
+                    Path(tmp),
+                )
+        self.assertEqual(result["status"], "not_detail")
+        self.assertEqual(result["paths"], [])
+        self.assertEqual(result["count"], 0)
+
     def test_member_delivery_is_written_when_authorized_and_cookie_is_available(self):
         task = {
             "name": "会员链接测试",
@@ -271,6 +356,27 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(skipped["diagnostics"]["skipped_published_count"], 1)
             self.assertEqual(included["count"], 1)
             self.assertEqual(unblocked["count"], 1)
+
+    def test_unpublished_course_is_skipped_after_three_selections(self):
+        raw = [{
+            "id": "theitzy:repeat",
+            "title": "AI 课程",
+            "page_url": "https://theitzy.net/repeat/",
+            "published_at": "2999-01-01T00:00:00+00:00",
+            "categories": ["AI"],
+            "summary": "课程资料",
+            "cover_url": "",
+        }]
+        task = {"name": "重复推荐限制", "source": "theitzy", "keywords": ["AI"], "source_config": {"base_url": "https://theitzy.net"}}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(pipeline, "fetch_source", return_value=raw):
+            output_dir = Path(tmp)
+            self.assertEqual(run_task(task, output_dir=output_dir)["count"], 1)
+            self.assertEqual(run_task(task, output_dir=output_dir)["count"], 1)
+            self.assertEqual(run_task(task, output_dir=output_dir)["count"], 1)
+            self.assertEqual(run_task(task, output_dir=output_dir)["count"], 1)
+            fifth = run_task(task, output_dir=output_dir)
+        self.assertEqual(fifth["count"], 0)
+        self.assertEqual(fifth["diagnostics"]["skipped_repeated_unpublished_count"], 1)
 
     def test_unpublished_selection_reuses_cached_item(self):
         task = {"name": "缓存测试", "source": "theitzy", "keywords": ["AI"], "source_config": {"base_url": "https://theitzy.net"}}

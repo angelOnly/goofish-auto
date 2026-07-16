@@ -66,7 +66,7 @@ HTML = """<!doctype html>
 header{padding:28px 32px 10px;display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
 h1{margin:0;font-size:28px}h2{margin:0 0 16px;font-size:20px}h3{margin:18px 0 10px;font-size:16px}
 main{padding:16px 32px 32px;display:grid;gap:16px}
-.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs button{background:transparent;color:var(--muted);border-color:transparent}.tabs button.active{background:var(--blue);color:white;border-color:var(--blue)}.tab-panel{display:none}.tab-panel.active{display:block}.grid>.tab-panel.active{grid-column:1/-1}
 .panel,.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px #1720330d}
 .panel{padding:18px}.card{padding:14px}.card small,.muted{color:var(--muted)}.card strong{display:block;margin-top:8px;font-size:18px}
 button,select,input{font:inherit}button,select{height:38px;border-radius:8px;border:1px solid #cbd5e1;background:white;padding:0 12px}
@@ -86,32 +86,23 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
 .copy-preview{white-space:pre-wrap;word-break:break-word;line-height:1.65;color:#24324a;background:#f8fafc;border:1px solid #edf2f7;border-radius:7px;padding:10px;margin:10px 0 0;max-height:none;overflow:visible}
 .market-compact{margin-top:10px}.peer-links{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px}.peer-links a{display:inline-flex;align-items:center;border:1px solid #cbd5e1;border-radius:7px;padding:2px 7px;background:white;font-size:12px;max-width:5.5em;overflow:hidden;white-space:nowrap}
 .publish-cell{min-width:110px}.publish-cell small{display:block;color:var(--muted);margin-top:4px}
-@media (max-width:1000px){.grid,.cards{grid-template-columns:1fr}header{display:block}main,header{padding-left:16px;padding-right:16px}}
+@media (max-width:1000px){.grid{grid-template-columns:1fr}.grid>.tab-panel.active{grid-column:1}.panel{padding:14px}header{display:block;padding:16px}main{padding:8px 12px 24px}table{display:block;overflow-x:auto;white-space:nowrap}.tabs{margin-top:12px}.tabs button{flex:1;min-width:calc(50% - 8px)}}
 </style>
 </head>
 <body>
 <header>
-  <div>
-    <h1>Goofish Auto 控制台</h1>
-    <p class="muted">本地资源任务、闲鱼热点监控、文案结果集中管理。</p>
-  </div>
-  <div class="row">
-    <button class="secondary" id="openPublishedBtn">已发布查询</button>
-    <button class="secondary" id="openTasksBtn">新标签打开任务管理</button>
-    <button class="secondary" id="openResultsBtn">新标签打开监控结果</button>
+  <h1>Goofish Auto 控制台</h1>
+  <nav class="tabs" aria-label="主要功能">
+    <button class="active" data-tab="local">本地资源</button>
+    <button data-tab="goofish">闲鱼热点</button>
+    <button data-tab="published">已发布</button>
+    <button data-tab="results">抓取内容</button>
     <button class="secondary" id="refreshBtn">刷新</button>
-  </div>
+  </nav>
 </header>
 <main>
-  <section class="cards">
-    <div class="card"><small>本地服务</small><strong id="healthText">检查中</strong></div>
-    <div class="card"><small>闲鱼 API</small><strong id="goofishHealthText">未检查</strong></div>
-    <div class="card"><small>最近运行</small><strong id="latestRunText">暂无</strong></div>
-    <div class="card"><small>远程任务</small><strong id="remoteCountText">-</strong></div>
-  </section>
-
   <section class="grid">
-    <div class="panel stack">
+    <div class="panel stack tab-panel active" data-tab-panel="local">
       <h2>本地资源整理</h2>
       <div class="row">
         <select id="localTask"></select>
@@ -132,7 +123,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
       <div id="runs"></div>
     </div>
 
-    <div class="panel stack">
+    <div class="panel stack tab-panel" data-tab-panel="goofish">
       <h2>闲鱼热点监控</h2>
       <div class="row">
         <button id="loadGoofishBtn">测试连接/刷新任务</button>
@@ -145,7 +136,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     </div>
   </section>
 
-  <section class="panel stack" id="publishedPanel">
+  <section class="panel stack tab-panel" id="publishedPanel" data-tab-panel="published">
     <h2>已发布内容查询</h2>
     <div class="row">
       <input id="publishedQuery" type="search" placeholder="搜标题、课程地址或ID" style="min-width:280px">
@@ -163,7 +154,7 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
     <div id="publishedPager" class="row"></div>
   </section>
 
-  <section class="panel">
+  <section class="panel tab-panel" data-tab-panel="results">
     <h2>结果详情</h2>
     <div id="runDetail" class="muted">点击最近运行里的“查看”查看生成条目。</div>
     <div id="itemDetail"></div>
@@ -346,8 +337,8 @@ async function loadConfig(){
   goofishUrls = cfg;
 }
 async function loadHealth(){
-  try { await api('/api/health'); $('healthText').textContent='正常'; $('healthText').className='ok'; }
-  catch(e){ $('healthText').textContent='异常'; $('healthText').className='bad'; }
+  try { await api('/api/health'); if($('healthText')){ $('healthText').textContent='正常'; $('healthText').className='ok'; } }
+  catch(e){ if($('healthText')){ $('healthText').textContent='异常'; $('healthText').className='bad'; } }
 }
 async function loadLocalTasks(){
   const tasks = await api('/api/local/tasks');
@@ -383,7 +374,7 @@ async function loadRuns(page=runsPage){
   const total = Array.isArray(data) ? runs.length : Number(data.total || 0);
   const totalPages = Array.isArray(data) ? 1 : Number(data.total_pages || 1);
   runsPage = Array.isArray(data) ? 1 : Number(data.page || runsPage);
-  $('latestRunText').textContent = runs[0]?.run_id || (runsPage > 1 ? `第${runsPage}页` : '暂无');
+  if($('latestRunText')) $('latestRunText').textContent = runs[0]?.run_id || (runsPage > 1 ? `第${runsPage}页` : '暂无');
   if(!runs.length){ $('runs').innerHTML = '<p class="muted">还没有运行记录。</p>'; return; }
   const pager = totalPages > 1
     ? `<div class="row">
@@ -699,8 +690,8 @@ async function loadGoofishTasks(){
   setStatus('goofishStatus','正在连接闲鱼监控 API...');
   try{
     const tasks = await api('/api/goofish/tasks');
-    $('goofishHealthText').textContent='正常'; $('goofishHealthText').className='ok';
-    $('remoteCountText').textContent=String(tasks.length);
+    if($('goofishHealthText')){ $('goofishHealthText').textContent='正常'; $('goofishHealthText').className='ok'; }
+    if($('remoteCountText')) $('remoteCountText').textContent=String(tasks.length);
     if(!tasks.length){ $('goofishTasks').innerHTML='<p class="muted">远程暂无任务。</p>'; setStatus('goofishStatus','连接成功，但没有任务','warn'); return; }
     const seen = {};
     const duplicateNames = new Set();
@@ -726,7 +717,7 @@ async function loadGoofishTasks(){
     const duplicateText = duplicateNames.size ? `发现 ${duplicateNames.size} 组同名重复任务；建议停止多余的，只保留一条。` : '没有发现同名重复任务。';
     setStatus('goofishStatus',`连接成功。${duplicateText} 运行中的任务会按“下次”时间采集，结果在闲鱼后台结果页查看。`,'ok');
   }catch(e){
-    $('goofishHealthText').textContent='异常'; $('goofishHealthText').className='bad';
+    if($('goofishHealthText')){ $('goofishHealthText').textContent='异常'; $('goofishHealthText').className='bad'; }
     setStatus('goofishStatus', e.message, 'bad');
   }
 }
@@ -796,10 +787,20 @@ async function refreshAll(){
   await Promise.allSettled([loadHealth(), loadConfig(), loadLocalTasks(), loadContentRules(), loadRuns(), loadGoofishTasks(), loadPublishedItems()]);
 }
 
+function switchTab(name){
+  document.querySelectorAll('[data-tab-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.tabPanel === name));
+  document.querySelectorAll('[data-tab]').forEach(button => {
+    const active = button.dataset.tab === name;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+}
+
 document.addEventListener('click', (event) => {
   const target = event.target.closest('button');
   if(!target) return;
-  if(target.id === 'refreshBtn') refreshAll();
+  if(target.dataset.tab) switchTab(target.dataset.tab);
+  else if(target.id === 'refreshBtn') refreshAll();
   else if(target.id === 'runBtn') runLocalTask();
   else if(target.id === 'loadGoofishBtn') loadGoofishTasks();
   else if(target.id === 'previewBootstrapBtn') previewBootstrap();

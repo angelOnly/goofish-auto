@@ -1192,6 +1192,80 @@ def _delivery_screenshot_config(task: Dict[str, Any]) -> tuple[bool, int, int]:
     return enabled, max(1, min(count, 3)), max(5, min(timeout, 120))
 
 
+_BAIDU_PASSWORD_SELECTORS = (
+    "input[placeholder*='\u63d0\u53d6\u7801']",
+    "input[placeholder*='\u5bc6\u7801']",
+    "input[aria-label*='\u63d0\u53d6\u7801']",
+    "input[name='pwd']",
+    "input[name='password']",
+    "#accessCode",
+    "#pwd",
+    "input.pickpw",
+)
+_BAIDU_SUBMIT_SELECTORS = (
+    "button:has-text('\u63d0\u53d6')",
+    "button:has-text('\u786e\u5b9a')",
+    "button:has-text('\u6253\u5f00')",
+    "input[type='button'][value*='\u63d0\u53d6']",
+    "input[type='submit']",
+    ".g-button",
+)
+
+
+def _baidu_page_state(page: Any) -> Dict[str, Any]:
+    """Return conservative indicators for the Baidu share detail page."""
+    script = """
+        () => {
+          const visible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            return style.visibility !== 'hidden' && style.display !== 'none' &&
+              (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0);
+          };
+          const anyVisible = (selectors) => selectors.some((selector) =>
+            Array.from(document.querySelectorAll(selector)).some(visible));
+          const passwordSelectors = [
+            "input[placeholder*='提取码']", "input[placeholder*='密码']",
+            "input[aria-label*='提取码']", "input[name='pwd']",
+            "input[name='password']", "#accessCode", "#pwd", "input.pickpw"
+          ];
+          const detailSelectors = [
+            ".module-list-view", ".file-list", ".file-name", ".file-list-item",
+            "[class*='file-list']", "[class*='list-view']", "[class*='file-name']",
+            "[data-testid*='file']", "[aria-label*='文件']"
+          ];
+          const text = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ');
+          const markers = ['返回上一级', '全部文件', '文件名', '保存到网盘', '下载'];
+          const markerHits = markers.filter((marker) => text.includes(marker));
+          const hasPasswordInput = anyVisible(passwordSelectors);
+          const hasDetailSelector = anyVisible(detailSelectors);
+          return {
+            hasPasswordInput,
+            hasDetailSelector,
+            markerHits,
+            isDetail: !hasPasswordInput && (hasDetailSelector || markerHits.length >= 2),
+            url: window.location.href
+          };
+        }
+    """
+    try:
+        state = page.evaluate(script)
+    except Exception:
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+def _visible_locator(page: Any, selectors: Iterable[str], timeout: int = 500) -> Any:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if locator.is_visible(timeout=timeout):
+                return locator
+        except Exception:
+            continue
+    return None
+
+
 def capture_baidu_delivery_screenshots(item: Dict[str, Any], task: Dict[str, Any], asset_dir: Path) -> Dict[str, Any]:
     """Capture 1\u20133 viewport screenshots from an authorized Baidu share page."""
     enabled, count, timeout = _delivery_screenshot_config(task)
@@ -1226,21 +1300,39 @@ def capture_baidu_delivery_screenshots(item: Dict[str, Any], task: Dict[str, Any
                 pass
             passwords = [str(value).strip() for value in member_delivery.get("passwords", []) if str(value).strip()]
             if passwords:
-                for selector in ("input[placeholder*='\u63d0\u53d6\u7801']", "input[placeholder*='\u5bc6\u7801']", "input[aria-label*='\u63d0\u53d6\u7801']", "input[name='pwd']", "#accessCode"):
-                    locator = page.locator(selector).first
+                password_input = _visible_locator(page, _BAIDU_PASSWORD_SELECTORS)
+                if password_input is not None:
                     try:
-                        if locator.is_visible(timeout=500):
-                            locator.fill(passwords[0])
-                            for button_selector in ("button:has-text('\u63d0\u53d6')", "button:has-text('\u786e\u5b9a')", "input[type='button']"):
-                                button = page.locator(button_selector).first
-                                if button.is_visible(timeout=500):
-                                    button.click(timeout=1000)
-                                    break
-                            page.wait_for_timeout(800)
-                            break
+                        password_input.fill(passwords[0])
+                        submit = _visible_locator(page, _BAIDU_SUBMIT_SELECTORS)
+                        if submit is not None:
+                            submit.click(timeout=1000)
                     except Exception:
-                        continue
-            page.wait_for_timeout(800)
+                        LOGGER.debug("unable to submit Baidu extraction code", exc_info=True)
+
+            # Require a positive detail-page signal before capturing anything.
+            # Otherwise the outer share-code/cover page gets saved repeatedly.
+            state: Dict[str, Any] = {}
+            deadline = time.monotonic() + min(float(timeout), 15.0)
+            attempts = 0
+            max_attempts = max(1, min(int(timeout * 2), 30))
+            while attempts < max_attempts and time.monotonic() < deadline:
+                state = _baidu_page_state(page)
+                if state.get("isDetail"):
+                    break
+                attempts += 1
+                page.wait_for_timeout(500)
+            if not state.get("isDetail"):
+                final_url = str(state.get("url") or page.url)
+                context.close()
+                browser.close()
+                return {
+                    "status": "not_detail",
+                    "paths": [],
+                    "url": final_url,
+                    "count": 0,
+                    "message": "未进入百度网盘文件详情页，未保存截图。",
+                }
             page.evaluate("window.scrollTo(0, 0)")
             page.wait_for_timeout(300)
             scroll_height = int(page.evaluate("document.body ? document.body.scrollHeight : 0") or 0)
@@ -1778,7 +1870,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     exclude_keywords = [str(value) for value in task.get("exclude_keywords", []) if str(value).strip()]
     max_age_days_raw = task.get("max_age_days")
     max_age_days = float(max_age_days_raw) if max_age_days_raw not in {None, ""} else None
-    output_limit = max(1, min(int(task.get("output_limit", 20)), 100))
+    output_limit = max(1, min(int(task.get("output_limit", 15)), 15))
     run_log: List[Dict[str, Any]] = []
 
     def note(message: str, **fields: Any) -> None:
@@ -1838,6 +1930,16 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             continue
         candidates.append(scored)
 
+    selection_candidates = get_selection_statuses([str(item.get("id") or "") for item in candidates], db_path)
+    skipped_repeated = 0
+    filtered_candidates: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        status = selection_candidates.get(str(candidate.get("id") or ""), {})
+        if not status.get("published") and int(status.get("selection_count") or 0) > 3:
+            skipped_repeated += 1
+            continue
+        filtered_candidates.append(candidate)
+    candidates = filtered_candidates
     matched_candidates = [item for item in candidates if item.get("matched_keywords")]
     pool = matched_candidates if matched_candidates else candidates
     fallback_used = bool(candidates and not matched_candidates)
@@ -1864,6 +1966,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         "skipped_published_count": skipped_published,
         "skipped_old_count": skipped_old,
         "skipped_excluded_count": skipped_excluded,
+        "skipped_repeated_unpublished_count": skipped_repeated,
         "candidate_count": len(candidates),
         "matched_count": len(matched_candidates),
         "unmatched_count": max(0, len(candidates) - len(matched_candidates)),
@@ -1896,6 +1999,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         skipped_published_count=skipped_published,
         skipped_old_count=skipped_old,
         skipped_excluded_count=skipped_excluded,
+        skipped_repeated_unpublished_count=skipped_repeated,
         candidate_count=len(candidates),
         matched_count=len(matched_candidates),
         selected_count=len(items),
@@ -1957,7 +2061,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         len((item.get("delivery_screenshots") or {}).get("paths") or []) for item in items
     )
     diagnostics["delivery_screenshot_error_count"] = sum(
-        1 for item in items if (item.get("delivery_screenshots") or {}).get("status") in {"error", "unavailable"}
+        1 for item in items if (item.get("delivery_screenshots") or {}).get("status") in {"error", "unavailable", "not_detail"}
     )
     diagnostics["ai_copy_count"] = sum(1 for item in items if item.get("copy_source") == "ai")
     diagnostics["ai_model"] = ai_copy_config()["model"] if ai_copy_configured() else ""
