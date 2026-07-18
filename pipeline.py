@@ -37,6 +37,8 @@ USER_AGENT = "XinliResourcePipeline/0.1 (local review; respects robots.txt)"
 LOGGER = logging.getLogger("goofish_auto.pipeline")
 LOCAL_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 DEFAULT_CONTENT_RULES = {"forbidden_words": ["chatgpt", "gpt"], "replacement": "AI工具"}
+COPY_VERSION = 2
+DELIVERY_SCREENSHOT_VERSION = 2
 GENERIC_MARKET_TERMS = {
     "ai",
     "人工智能",
@@ -184,12 +186,21 @@ def load_env_file(path: Path = ENV_FILE) -> None:
             os.environ.setdefault(key, value)
 
 
-def http_text(url: str, *, timeout: int = 30, headers: Optional[Dict[str, str]] = None) -> str:
+def http_text(
+    url: str,
+    *,
+    timeout: int = 30,
+    headers: Optional[Dict[str, str]] = None,
+    return_url: bool = False,
+) -> str | tuple[str, str]:
     request_headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/json"}
     request_headers.update(headers or {})
     request = Request(url, headers=request_headers)
     with urlopen(request, timeout=timeout) as response:
-        return response.read().decode("utf-8", errors="replace")
+        content = response.read().decode("utf-8", errors="replace")
+        if return_url:
+            return content, str(response.geturl() or url)
+        return content
 
 
 def http_json(url: str, *, timeout: int = 30) -> Any:
@@ -369,6 +380,22 @@ def _decode_js_url(value: str) -> str:
     return html.unescape(value or "").replace("\\/", "/")
 
 
+def _is_baidu_share_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    host = (parsed.hostname or "").lower()
+    return host in {"pan.baidu.com", "yun.baidu.com"} and (
+        parsed.path.startswith("/s/") or parsed.path.startswith("/share/")
+    )
+
+
+def _download_quota_exhausted(message: str) -> bool:
+    text = strip_html(html.unescape(str(message or "")), 2000)
+    return bool(
+        "下载" in text
+        and re.search(r"(?:剩余|余量)[^\d]{0,8}0(?:\D|$)", text)
+    )
+
+
 def extract_member_download_context(content_html: str, page_url: str) -> Dict[str, str]:
     post_id = ""
     ajax_url = ""
@@ -437,6 +464,7 @@ def parse_wp_post(raw: Dict[str, Any], category_map: Dict[int, str]) -> Dict[str
         "categories": categories,
         "tags": raw.get("tags", []),
         "summary": excerpt,
+        "course_outline": strip_html(content_html, 5000),
         "cover_url": str(image_url or ""),
     }
 
@@ -1203,6 +1231,8 @@ _BAIDU_PASSWORD_SELECTORS = (
     "input.pickpw",
 )
 _BAIDU_SUBMIT_SELECTORS = (
+    "#submitBtn",
+    ".submit-btn-text",
     "button:has-text('\u63d0\u53d6')",
     "button:has-text('\u786e\u5b9a')",
     "button:has-text('\u6253\u5f00')",
@@ -1287,6 +1317,7 @@ def capture_baidu_delivery_screenshots(item: Dict[str, Any], task: Dict[str, Any
         return {"status": "unavailable", "paths": [], "url": links[0], "count": 0, "message": "\u672a\u5b89\u88c5 Playwright\uff1b\u8bf7\u5b89\u88c5\u4f9d\u8d56\u5e76\u6267\u884c playwright install chromium\u3002"}
     asset_dir.mkdir(parents=True, exist_ok=True)
     url = links[0]
+    screenshot_prefix = safe_slug(str(item.get("id") or item.get("title") or "item"))
     paths: List[str] = []
     try:
         with sync_playwright() as playwright:
@@ -1342,7 +1373,7 @@ def capture_baidu_delivery_screenshots(item: Dict[str, Any], task: Dict[str, Any
             for index, position in enumerate(positions, start=1):
                 page.evaluate("y => window.scrollTo(0, y)", position)
                 page.wait_for_timeout(350)
-                screenshot_path = asset_dir / f"delivery-screenshot-{index}.png"
+                screenshot_path = asset_dir / f"{screenshot_prefix}-delivery-screenshot-{index}.png"
                 page.screenshot(path=str(screenshot_path), full_page=False)
                 paths.append(str(screenshot_path.relative_to(asset_dir.parent.parent)).replace("\\", "/"))
             final_url = page.url
@@ -1357,6 +1388,7 @@ def fetch_member_delivery(
     item: Dict[str, Any],
     task: Dict[str, Any],
     last_request: List[float],
+    quota_state: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     source_config = task.get("source_config") or {}
     if not source_config.get("fetch_member_delivery"):
@@ -1368,6 +1400,15 @@ def fetch_member_delivery(
             "passwords": [],
             "source_url": item.get("page_url", ""),
             "message": "未确认分发权，已跳过会员网盘链接抓取。",
+        }
+    if quota_state and quota_state.get("exhausted"):
+        return {
+            "status": "quota_exhausted",
+            "links": [],
+            "passwords": [],
+            "source_url": item.get("page_url", ""),
+            "message": str(quota_state.get("message") or "今日下载额度已用完。"),
+            "request_count": 0,
         }
     page_url = str(item.get("page_url") or "")
     if not page_url:
@@ -1384,6 +1425,7 @@ def fetch_member_delivery(
         }
     interval = float(source_config.get("member_request_interval_seconds", source_config.get("request_interval_seconds", 10)))
     timeout = int(source_config.get("member_timeout", 30))
+    request_count = 0
     try:
         sleep_between_requests(last_request, interval)
         content = http_text(
@@ -1402,6 +1444,7 @@ def fetch_member_delivery(
             post_id = str(item.get("source_id") or "").strip() or context.get("post_id", "")
             ajax_url = context.get("ajax_url", "")
             if post_id and ajax_url:
+                request_count = 1
                 ajax_payload = http_form_json(
                     ajax_url,
                     {"action": "user_down_ajax", "post_id": post_id},
@@ -1412,25 +1455,42 @@ def fetch_member_delivery(
                     },
                 )
                 ajax_msg = str(ajax_payload.get("msg") or "")
-                ajax_delivery = extract_baidu_delivery_from_html(ajax_msg, page_url)
-                if not ajax_delivery.get("links") and ajax_payload.get("status") in {1, "1"} and ajax_msg:
-                    go_url = urljoin(page_url, _decode_js_url(ajax_msg))
-                    go_content = http_text(
-                        go_url,
-                        timeout=timeout,
-                        headers={
-                            "Accept": "text/html",
-                            "Cookie": cookie,
-                            "Referer": page_url,
-                        },
-                    )
-                    ajax_delivery = extract_baidu_delivery_from_html(go_content, go_url)
-                if ajax_delivery.get("links"):
-                    delivery = _merge_delivery(delivery, ajax_delivery)
-                elif ajax_payload.get("msg"):
-                    delivery["message"] = str(ajax_payload.get("msg"))
+                if _download_quota_exhausted(ajax_msg):
+                    delivery["status"] = "quota_exhausted"
+                    delivery["message"] = ajax_msg
+                    if quota_state is not None:
+                        quota_state.update({"exhausted": True, "message": ajax_msg})
+                else:
+                    ajax_delivery = extract_baidu_delivery_from_html(ajax_msg, page_url)
+                    if not ajax_delivery.get("links") and ajax_payload.get("status") in {1, "1"} and ajax_msg:
+                        go_url = urljoin(page_url, _decode_js_url(ajax_msg))
+                        go_result = http_text(
+                            go_url,
+                            timeout=timeout,
+                            headers={
+                                "Accept": "text/html",
+                                "Cookie": cookie,
+                                "Referer": page_url,
+                            },
+                            return_url=True,
+                        )
+                        if isinstance(go_result, tuple):
+                            go_content, final_url = go_result
+                        else:  # kept for patched/test transports
+                            go_content, final_url = str(go_result), ""
+                        ajax_delivery = extract_baidu_delivery_from_html(go_content, final_url or go_url)
+                        if _is_baidu_share_url(final_url):
+                            ajax_delivery = _merge_delivery(
+                                ajax_delivery,
+                                {"status": "found", "links": [final_url], "passwords": [], "source_url": final_url},
+                            )
+                    if ajax_delivery.get("links"):
+                        delivery = _merge_delivery(delivery, ajax_delivery)
+                    elif ajax_payload.get("msg"):
+                        delivery["message"] = ajax_msg
             else:
                 delivery["message"] = "页面没有找到下载按钮 data-id 或 ajaxurl。"
+        delivery["request_count"] = request_count
         LOGGER.info(
             "member_delivery fetched course_id=%s status=%s links=%s",
             item.get("id"),
@@ -1446,6 +1506,7 @@ def fetch_member_delivery(
             "passwords": [],
             "source_url": page_url,
             "message": str(exc),
+            "request_count": request_count,
         }
 
 
@@ -1463,12 +1524,13 @@ def format_delivery_links(item: Dict[str, Any], task: Dict[str, Any]) -> str:
     if owned_links:
         return "\n".join(f"- {link}" for link in owned_links)
 
-    if member_delivery and member_delivery.get("status") in {"missing_cookie", "not_found", "error", "missing_page_url"}:
+    if member_delivery and member_delivery.get("status") in {"missing_cookie", "not_found", "error", "missing_page_url", "quota_exhausted"}:
         status_text = {
             "missing_cookie": member_delivery.get("message") or "未设置会员 Cookie，无法请求会员页。",
-            "not_found": "会员页中没有识别到百度网盘链接。",
+            "not_found": member_delivery.get("message") or "会员页中没有识别到百度网盘链接。",
             "error": f"会员页请求失败：{member_delivery.get('message') or '未知错误'}",
             "missing_page_url": "缺少课程页地址，无法请求会员页。",
+            "quota_exhausted": member_delivery.get("message") or "今日会员下载额度已用完，请明天再试。",
         }.get(str(member_delivery.get("status")), "")
         return f"- 待填入你自己的授权网盘链接\n- 会员链接抓取状态：{status_text}"
 
@@ -1500,41 +1562,34 @@ def template_copy(item: Dict[str, Any], task: Dict[str, Any]) -> str:
     categories = item.get("categories") or ["数字资料"]
     category_text = "、".join(categories)
     summary = item.get("summary") or "以页面公开信息为准，具体目录请以交付前确认内容为准。"
-    bullets = _summary_bullets(summary)
+    source_text = re.sub(r"https?://\S+", "", str(item.get("course_outline") or summary))
+    bullets = _summary_bullets(str(source_text), limit=5)
+    lead, learning_bullets = bullets[0], bullets[1:] or bullets
+    if len(lead) > 120:
+        lead = lead[:117].rstrip(" ，、") + "…"
     topic = categories[0] if categories else "数字资料"
     tags = _copy_tags(item)
-    market_terms = item.get("market_matched_terms") or []
-    market_reference = ""
-    if market_terms:
-        price_hint = ""
-        if item.get("market_median_price") is not None:
-            price_hint = f"；闲鱼同类监控中位价约 ¥{item.get('market_median_price')}"
-        market_reference = (
-            "\n【市场参考】\n"
-            f"闲鱼热点监控命中：{', '.join(str(value) for value in market_terms[:8])}{price_hint}。"
-            "该信息仅用于判断需求，不代表可直接发布或交付第三方内容。\n\n"
-        )
-
+    display_title = re.split(r"\s*\|\s*", title, maxsplit=1)[0].strip() or title
+    member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else {}
+    delivery_ready = bool(
+        task.get("rights_confirmed")
+        and (member_delivery.get("links") or item.get("delivery_links"))
+    )
     copy = (
-        f"{title}\n"
+        f"{display_title}｜课程资料\n"
         + f"{tags}\n\n"
-        + "【核心价值】\n"
-        + f"围绕 {topic} 的系统学习/资料整理方向，适合想快速判断内容价值、补齐知识框架的人。购买前建议先确认目录、格式和交付清单。\n\n"
-        + "【内容聚焦】\n"
-        + "\n".join(f"- {line}" for line in bullets)
+        + "【购买理由】\n"
+        + f"如果你正在系统补齐 {topic}，这套内容重点围绕“{lead}”展开，适合不想在零散搜索里反复试错、希望按一条完整路线学习的人。\n\n"
+        + "【你会学到】\n"
+        + "\n".join(f"- {line}" for line in learning_bullets)
         + "\n\n【适合人群】\n"
-        + f"- 想系统了解 {topic}，但不想零散搜索资料的人\n"
-        + "- 需要按目录学习、复盘或做项目参考的人\n"
-        + "- 想先看清内容范围，再决定是否深入学习的人\n\n"
-        + "【资料优势】\n"
-        + "- 主题明确，适合做学习路线或选品需求判断\n"
-        + "- 支持先确认目录/格式/适用人群，再决定是否拍下\n"
-        + "- 如用于正式发布，请只交付自有或已授权的网盘内容\n\n"
-        + market_reference
-        + "【关键信息】\n"
-        + f"主题分类：{category_text}\n"
-        + "交付方式：审核通过后填写你自己的授权百度网盘链接\n"
-        + "温馨提示：数字资料非实物，拍下前请确认内容清单、文件格式和售后规则。"
+        + f"- 想把 {topic} 从概念梳理到能跟着练习的人\n"
+        + "- 需要按课程结构学习、复盘或做项目参考的人\n"
+        + "- 希望先看清目录和交付格式，再决定是否入手的人\n\n"
+        + "【交付说明】\n"
+        + ("拍下后发送百度网盘链接和提取码。\n" if delivery_ready else "拍下前先确认内容清单、文件格式和适用范围。\n")
+        + "数字内容不发实体；需要目录或格式说明，欢迎先私聊确认，合适再拍。\n\n"
+        + f"主题分类：{category_text}"
     )
     return apply_content_rules(copy)
 
@@ -1560,29 +1615,30 @@ def maybe_ai_copy(item: Dict[str, Any], task: Dict[str, Any]) -> Optional[str]:
     if not base_url or not model:
         return None
     member_delivery = item.get("member_delivery") if isinstance(item.get("member_delivery"), dict) else {}
-    delivery_ready = bool(task.get("rights_confirmed") and member_delivery.get("links"))
+    delivery_ready = bool(
+        task.get("rights_confirmed")
+        and (member_delivery.get("links") or item.get("delivery_links"))
+    )
     content_rules = load_content_rules()
     forbidden_words = content_rules.get("forbidden_words") or []
     replacement = str(content_rules.get("replacement") or "")
     prompt = (
-        "你是闲鱼数字课程商品文案编辑。请根据下面的课程元数据写一版可直接复制到闲鱼的中文商品文案。"
+        "你是闲鱼数字课程商品文案编辑。请根据下面的真实课程资料，写一版更有购买理由、但不夸大不虚构的中文商品文案。"
         "要求：\n"
-        "1. 不声称官方授权，不虚构目录、时长、格式、售后或效果承诺。\n"
-        "2. 不在商品文案里暴露百度网盘链接或提取码。\n"
-        "3. 语气自然，适合个人卖家，避免夸张营销词。\n"
-        "4. 输出结构固定为：标题、正文、适合人群、交付说明、注意事项、标签。\n"
-        "5. 如果 delivery_ready=false，只能写“拍下前先确认内容清单”，不要写自动发货或网盘已备好。\n"
-        "6. 如果 delivery_ready=true，可以写“拍下后发送百度网盘链接和提取码”。\n"
-        f"7. 商品文案禁止出现这些词：{', '.join(str(word) for word in forbidden_words)}；如需表达，用“{replacement}”替代。\n"
+        "1. 开头先说清买家痛点和这套内容解决什么问题，再给出具体学习收获。\n"
+        "2. 只使用提供的课程标题、分类、摘要和课程正文，不虚构目录、时长、格式、售后或效果承诺。\n"
+        "3. 不在商品文案里暴露真实百度网盘链接或提取码。\n"
+        "4. 语气像靠谱的个人卖家，少用空泛形容词，不写市场监控、选品、审核、第三方分发等内部说明。\n"
+        "5. 输出结构固定为：标题、购买理由、你会学到、适合人群、交付说明、注意事项、标签；控制在 300-500 字。\n"
+        "6. 如果 delivery_ready=false，只能写“拍下前先确认内容清单”，不要写自动发货或网盘已备好。\n"
+        "7. 如果 delivery_ready=true，可以写“拍下后发送百度网盘链接和提取码”。\n"
+        f"8. 商品文案禁止出现这些词：{', '.join(str(word) for word in forbidden_words)}；如需表达，用“{replacement}”替代。\n"
         + json.dumps(
             {
                 "title": item.get("title"),
                 "categories": item.get("categories"),
                 "summary": item.get("summary"),
-                "market_median_price": item.get("market_median_price"),
-                "market_price_min": item.get("market_price_min"),
-                "market_price_max": item.get("market_price_max"),
-                "market_matched_terms": item.get("market_matched_terms", []),
+                "course_outline": re.sub(r"https?://\S+", "", str(item.get("course_outline") or "")),
                 "rights_confirmed": bool(task.get("rights_confirmed")),
                 "delivery_ready": delivery_ready,
                 "delivery_format": "百度网盘链接+提取码/文件密码" if delivery_ready else "待审核确认",
@@ -1739,6 +1795,7 @@ def _merge_cached_item(cached: Dict[str, Any], current: Dict[str, Any]) -> Dict[
         "market_price_max",
         "selection_status",
         "age_days",
+        "course_outline",
     }
     merged = {**cached}
     for key in dynamic_keys:
@@ -1757,8 +1814,6 @@ def should_reuse_cached_item(cached: Dict[str, Any], task: Dict[str, Any]) -> bo
     configured_links = [str(link) for link in task.get("owned_delivery_links", []) if str(link).strip()]
     cached_links = [str(link) for link in cached.get("delivery_links", []) if str(link).strip()]
     if configured_links != cached_links:
-        return False
-    if ai_copy_configured() and cached.get("copy_source") != "ai":
         return False
     source_config = task.get("source_config") or {}
     needs_member_delivery = bool(source_config.get("fetch_member_delivery") and task.get("rights_confirmed"))
@@ -1861,7 +1916,7 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     legacy_seen = state.setdefault("seen", {})
     db_path = selection_db_path(output_dir)
     published_course_ids = get_published_course_ids(db_path)
-    run_id = local_now().strftime("%Y%m%d-%H%M%S")
+    run_id = local_now().strftime("%Y%m%d-%H%M%S-%f")
     run_dir = output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     asset_dir = run_dir / "assets"
@@ -2014,6 +2069,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     cached_items = get_cached_unpublished_items(item_ids, db_path) if reuse_unpublished else {}
     source_config = task.get("source_config") or {}
     member_delivery_last_request: List[float] = []
+    member_delivery_quota_state: Dict[str, Any] = {}
+    member_delivery_request_count = 0
     enriched_items: List[Dict[str, Any]] = []
 
     for item in items:
@@ -2022,27 +2079,52 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         member_delivery_checked = False
         if cached and should_reuse_cached_item(cached, task):
             item = _merge_cached_item(cached, item)
+            if item.get("copy_version") != COPY_VERSION or (
+                ai_copy_configured() and item.get("copy_source") != "ai"
+            ):
+                ai_copy = maybe_ai_copy(item, task)
+                item["copy"] = ai_copy or template_copy(item, task)
+                item["copy_source"] = "ai" if ai_copy else "template"
+                item["copy_version"] = COPY_VERSION
         else:
             item["cache_reused"] = False
             item["cover_local_path"] = download_authorized_cover(item, task, asset_dir)
             item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
             item["delivery_links"] = list(task.get("owned_delivery_links", []))
-            member_delivery = fetch_member_delivery(item, task, member_delivery_last_request)
+            member_delivery = fetch_member_delivery(
+                item,
+                task,
+                member_delivery_last_request,
+                member_delivery_quota_state,
+            )
+            member_delivery_request_count += int((member_delivery or {}).get("request_count") or 0)
             member_delivery_checked = True
             if member_delivery is not None:
                 item["member_delivery"] = member_delivery
             ai_copy = maybe_ai_copy(item, task)
             item["copy"] = ai_copy or template_copy(item, task)
             item["copy_source"] = "ai" if ai_copy else "template"
+            item["copy_version"] = COPY_VERSION
         item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
         item["delivery_links"] = list(task.get("owned_delivery_links", []))
         if source_config.get("fetch_member_delivery") and not member_delivery_checked and not isinstance(item.get("member_delivery"), dict):
-            member_delivery = fetch_member_delivery(item, task, member_delivery_last_request)
+            member_delivery = fetch_member_delivery(
+                item,
+                task,
+                member_delivery_last_request,
+                member_delivery_quota_state,
+            )
+            member_delivery_request_count += int((member_delivery or {}).get("request_count") or 0)
             if member_delivery is not None:
                 item["member_delivery"] = member_delivery
         screenshot_enabled, _, _ = _delivery_screenshot_config(task)
-        if screenshot_enabled and not (item.get("delivery_screenshots") or {}).get("paths"):
+        screenshot_info = item.get("delivery_screenshots") if isinstance(item.get("delivery_screenshots"), dict) else {}
+        if screenshot_enabled and (
+            not screenshot_info.get("paths")
+            or screenshot_info.get("version") != DELIVERY_SCREENSHOT_VERSION
+        ):
             item["delivery_screenshots"] = capture_baidu_delivery_screenshots(item, task, asset_dir)
+            item["delivery_screenshots"]["version"] = DELIVERY_SCREENSHOT_VERSION
         if item.get("copy"):
             item["copy"] = apply_content_rules(str(item["copy"]))
         item["selection_status"] = selection_statuses.get(course_id, item.get("selection_status") or {"published": False})
@@ -2054,6 +2136,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         for item in items
         if isinstance(item.get("member_delivery"), dict) and item["member_delivery"].get("links")
     )
+    diagnostics["member_delivery_request_count"] = member_delivery_request_count
+    diagnostics["member_delivery_quota_exhausted"] = bool(member_delivery_quota_state.get("exhausted"))
     diagnostics["delivery_screenshot_item_count"] = sum(
         1 for item in items if (item.get("delivery_screenshots") or {}).get("paths")
     )
@@ -2061,7 +2145,9 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         len((item.get("delivery_screenshots") or {}).get("paths") or []) for item in items
     )
     diagnostics["delivery_screenshot_error_count"] = sum(
-        1 for item in items if (item.get("delivery_screenshots") or {}).get("status") in {"error", "unavailable", "not_detail"}
+        1
+        for item in items
+        if (item.get("delivery_screenshots") or {}).get("status") in {"error", "unavailable", "not_detail", "no_link"}
     )
     diagnostics["ai_copy_count"] = sum(1 for item in items if item.get("copy_source") == "ai")
     diagnostics["ai_model"] = ai_copy_config()["model"] if ai_copy_configured() else ""
@@ -2069,6 +2155,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         "items_enriched",
         reused_unpublished_count=diagnostics["reused_unpublished_count"],
         member_delivery_found_count=diagnostics["member_delivery_found_count"],
+        member_delivery_request_count=diagnostics["member_delivery_request_count"],
+        member_delivery_quota_exhausted=diagnostics["member_delivery_quota_exhausted"],
         delivery_screenshot_item_count=diagnostics["delivery_screenshot_item_count"],
         delivery_screenshot_count=diagnostics["delivery_screenshot_count"],
         delivery_screenshot_error_count=diagnostics["delivery_screenshot_error_count"],

@@ -121,6 +121,53 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(context["post_id"], "25611")
         self.assertEqual(context["ajax_url"], "https://theitzy.net/wp-admin/admin-ajax.php")
 
+    def test_template_copy_uses_course_outline_and_omits_internal_market_text(self):
+        copy = pipeline.template_copy(
+            {
+                "title": "AI 数据平台实战 | English title",
+                "categories": ["人工智能"],
+                "summary": "简短摘要",
+                "course_outline": "从评估文本转SQL失败原因开始。设计语义层并实施权限治理。构建受保护的MCP服务。",
+                "matched_keywords": ["AI"],
+            },
+            {"rights_confirmed": False},
+        )
+        self.assertIn("设计语义层并实施权限治理", copy)
+        self.assertNotIn("市场参考", copy)
+        self.assertNotIn("选品需求判断", copy)
+
+    def test_member_delivery_stops_after_quota_response(self):
+        task = {
+            "rights_confirmed": True,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+            },
+        }
+        item = {
+            "id": "theitzy:quota",
+            "source_id": 25611,
+            "page_url": "https://theitzy.net/course/",
+        }
+        page_html = (
+            '<script>var caozhuti={"ajaxurl":"https:\\/\\/theitzy.net\\/wp-admin\\/admin-ajax.php"}</script>'
+            '<a data-id="25611" class="go-down btn">立即下载</a>'
+        )
+        quota_message = "今日免费下载次数已用〖15〗，剩余〖0〗"
+        state = {}
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
+            with patch.object(pipeline, "http_text", return_value=page_html), patch.object(
+                pipeline,
+                "http_form_json",
+                return_value={"status": 0, "msg": quota_message},
+            ) as ajax:
+                first = pipeline.fetch_member_delivery(item, task, [], state)
+                second = pipeline.fetch_member_delivery(item, task, [], state)
+        self.assertEqual(first["status"], "quota_exhausted")
+        self.assertEqual(second["status"], "quota_exhausted")
+        ajax.assert_called_once()
+
     def test_run_is_review_first(self):
         task = {
             "name": "测试",
@@ -156,18 +203,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["status"], "skipped_rights_unconfirmed")
 
     def test_delivery_screenshot_does_not_succeed_on_outer_share_page(self):
+        submit_seen = {"value": False}
+
         class FakeLocator:
             def __init__(self, selector):
                 self.selector = selector
                 self.first = self
 
             def is_visible(self, timeout=0):
-                return "input[" in self.selector or "button:" in self.selector
+                return "input[" in self.selector or self.selector == "#submitBtn"
 
             def fill(self, value):
                 self.value = value
 
             def click(self, timeout=0):
+                if self.selector == "#submitBtn":
+                    submit_seen["value"] = True
                 self.clicked = True
 
         class FakePage:
@@ -238,6 +289,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["status"], "not_detail")
         self.assertEqual(result["paths"], [])
         self.assertEqual(result["count"], 0)
+        self.assertTrue(submit_seen["value"])
 
     def test_member_delivery_is_written_when_authorized_and_cookie_is_available(self):
         task = {
@@ -297,9 +349,13 @@ class PipelineTests(unittest.TestCase):
             '<a target="_blank" data-id="25611" class="go-down btn">立即下载</a>'
             '<span class="pwd">文件密码：<span>qa8i</span></span>'
         )
-        go_html = "<script>window.location='https://pan.baidu.com/s/1RealLink'</script>"
+        go_html = "<html>redirected</html>"
         with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
-            with patch.object(pipeline, "http_text", side_effect=[page_html, go_html]):
+            with patch.object(
+                pipeline,
+                "http_text",
+                side_effect=[page_html, (go_html, "https://pan.baidu.com/s/1RealLink")],
+            ):
                 with patch.object(pipeline, "http_form_json", return_value={"status": "1", "msg": "https://theitzy.net/go?post_id=25611"}):
                     delivery = pipeline.fetch_member_delivery(item, task, [])
         self.assertEqual(delivery["status"], "found")

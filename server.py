@@ -284,12 +284,14 @@ function renderDiagnostics(data){
   const market = d.market_enabled ? `；闲鱼市场样本 ${esc(d.market_signal_count ?? 0)} 条` : '';
   const reused = d.reused_unpublished_count ? `；复用未发布缓存 ${esc(d.reused_unpublished_count)} 条` : '';
   const memberDelivery = d.member_delivery_found_count ? `；会员网盘链接 ${esc(d.member_delivery_found_count)} 条` : '';
+  const memberRequests = d.member_delivery_request_count ? `；会员下载请求 ${esc(d.member_delivery_request_count)} 次` : '';
+  const memberQuota = d.member_delivery_quota_exhausted ? '；今日会员下载额度已用完' : '';
   const screenshots = d.delivery_screenshot_count ? `; delivery screenshots ${esc(d.delivery_screenshot_count)}` : '';
   const screenshotErrors = d.delivery_screenshot_error_count ? `; screenshot failures ${esc(d.delivery_screenshot_error_count)}` : '';
   const cookieValid = d.member_cookie_validated ? '；会员 Cookie 已校验' : '';
   const aiCopy = d.ai_model ? `；AI文案 ${esc(d.ai_copy_count ?? 0)} 条（${esc(d.ai_model)}）` : '';
   const marketError = d.market_error ? `<p class="warn">闲鱼市场信号读取失败：${esc(d.market_error)}</p>` : '';
-  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}${screenshots}${screenshotErrors}${aiCopy}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}${memberRequests}${memberQuota}${screenshots}${screenshotErrors}${aiCopy}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
 }
 function detailRowFor(folder){
   return [...document.querySelectorAll('.inline-detail-row')].find(row => row.dataset.detailFor === folder);
@@ -348,6 +350,17 @@ function copySourceLabel(source){
   return source === 'ai'
     ? '<span class="pill ok">AI生成</span>'
     : '<span class="pill">模板</span>';
+}
+function deliveryScreenshotHtml(data){
+  const info = data?.delivery_screenshots || data?.item?.delivery_screenshots || {};
+  const paths = info.paths || [];
+  if(paths.length){
+    return `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><p class="tiny">已保存 ${paths.length} 张截图，点击可查看原图。</p><div class="image-preview-row">${paths.map((path, index) => { const src = `/api/local/asset?path=${encodeURIComponent(path)}`; return `<a class="thumb-link" href="${src}" target="_blank" rel="noreferrer"><img class="cover-preview" src="${src}" alt="\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe${index + 1}" loading="lazy"></a>`; }).join('')}</div></div>`;
+  }
+  if(info.status && info.status !== 'disabled'){
+    return `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><p class="warn">${esc(info.message || `截图状态：${info.status}`)}</p></div>`;
+  }
+  return '';
 }
 
 async function loadConfig(){
@@ -537,10 +550,7 @@ function previewPublishedItem(index, editDelivery=false){
   const sourceHtml = item.page_url
     ? `<h3>来源核验</h3><p><a target="_blank" rel="noreferrer" href="${esc(item.page_url)}">${esc(item.page_url)}</a></p>`
     : '';
-  const screenshotPaths = item.delivery_screenshots?.paths || item.item?.delivery_screenshots?.paths || [];
-  const screenshotHtml = screenshotPaths.length
-    ? `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><div class="image-preview-row">${screenshotPaths.map((path, index) => { const src = `/api/local/asset?path=${encodeURIComponent(path)}`; return `<a class="thumb-link" href="${src}" target="_blank" rel="noreferrer"><img class="cover-preview" src="${src}" alt="\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe${index + 1}" loading="lazy"></a>`; }).join('')}</div></div>`
-    : '';
+  const screenshotHtml = deliveryScreenshotHtml(item);
   const html =
     `<div class="inline-copy-panel"><h3>已发布商品</h3><p><strong>${esc(item.title)}</strong><br><small>${esc(item.published_at || '')}</small></p>` +
     deliveryHtml +
@@ -625,10 +635,7 @@ async function showItem(folder){
   const data = await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
   currentItem = data;
   const copyText = data.copy_display || data.copy || data.copy_suggested;
-  const screenshotPaths = data.delivery_screenshots?.paths || data.item?.delivery_screenshots?.paths || [];
-  const screenshotHtml = screenshotPaths.length
-    ? `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><p class="tiny">Saved ${screenshotPaths.length} screenshot(s); click to inspect or save the original.</p><div class="image-preview-row">${screenshotPaths.map((path, index) => { const src = `/api/local/asset?path=${encodeURIComponent(path)}`; return `<a class="thumb-link" href="${src}" target="_blank" rel="noreferrer"><img class="cover-preview" src="${src}" alt="\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe${index + 1}" loading="lazy"></a>`; }).join('')}</div></div>`
-    : '';
+  const screenshotHtml = deliveryScreenshotHtml(data);
   expandedFolder = folder;
   if(detailRow){
     const imagePreview = data.cover_url
@@ -683,10 +690,7 @@ async function showFullItem(folder){
   const data = currentItem?.folder === folder ? currentItem : await api(`/api/local/item?folder=${encodeURIComponent(folder)}`);
   currentItem = data;
   const copyText = data.copy_display || data.copy || data.copy_suggested;
-  const screenshotPaths = data.delivery_screenshots?.paths || data.item?.delivery_screenshots?.paths || [];
-  const screenshotHtml = screenshotPaths.length
-    ? `<div class="image-box"><h3>\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe</h3><p class="tiny">Saved ${screenshotPaths.length} screenshot(s); click to inspect or save the original.</p><div class="image-preview-row">${screenshotPaths.map((path, index) => { const src = `/api/local/asset?path=${encodeURIComponent(path)}`; return `<a class="thumb-link" href="${src}" target="_blank" rel="noreferrer"><img class="cover-preview" src="${src}" alt="\u767e\u5ea6\u7f51\u76d8\u8be6\u60c5\u622a\u56fe${index + 1}" loading="lazy"></a>`; }).join('')}</div></div>`
-    : '';
+  const screenshotHtml = deliveryScreenshotHtml(data);
   const imageHtml = data.cover_url
     ? `<div class="image-box"><h3>图片信息</h3><p class="tiny">小图只是预览，图片源是原图。点图可新标签打开原图；手机上长按图片可保存原图。</p><a class="thumb-link" target="_blank" rel="noreferrer" href="${esc(data.cover_url)}"><img class="cover-preview" src="${esc(data.cover_url)}" alt="封面预览" loading="lazy"></a></div>`
     : `<div class="image-box"><h3>图片信息</h3><p class="muted">这个条目没有公开封面地址。正式上架时建议补一张自有/授权封面图或目录图。</p></div>`;
@@ -951,6 +955,9 @@ def _start_local_run_job(task_name: str, include_seen: bool) -> dict[str, object
     job_id = uuid.uuid4().hex
     now = time.time()
     with LOCAL_RUN_LOCK:
+        # ponytail: one process-wide lock; use per-account locks if concurrency is needed later.
+        if any(job.get("status") == "running" for job in LOCAL_RUN_JOBS.values()):
+            raise RuntimeError("已有本地整理任务运行中，请等待完成后再启动")
         LOCAL_RUN_JOBS[job_id] = {
             "job_id": job_id,
             "status": "running",
@@ -1002,7 +1009,9 @@ def _delivery_payload(item: dict[str, object]) -> tuple[str, str]:
     if status == "missing_cookie":
         return "", f"未获取：{message or '缺少会员 Cookie'}"
     if status == "not_found":
-        return "", "未获取：会员页中没有识别到百度网盘链接"
+        return "", f"未获取：{message or '会员页中没有识别到百度网盘链接'}"
+    if status == "quota_exhausted":
+        return "", f"未获取：{message or '今日会员下载额度已用完，请明天再试'}"
     if status == "error":
         return "", f"未获取：会员页请求失败{('：' + message) if message else ''}"
     if status == "missing_page_url":

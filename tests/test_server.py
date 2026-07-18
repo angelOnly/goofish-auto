@@ -19,6 +19,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn('<script src="/static/dashboard.js" defer></script>', server.HTML)
         self.assertNotIn("refreshAll();", server.HTML)
         self.assertIn("refreshAll();", server.DASHBOARD_JS)
+        self.assertIn("deliveryScreenshotHtml", server.DASHBOARD_JS)
         self.assertIn("join('\\n');", server.DASHBOARD_JS)
         self.assertNotIn("join('\n');", server.DASHBOARD_JS)
 
@@ -38,6 +39,17 @@ class ServerTests(unittest.TestCase):
                 time.sleep(0.05)
         self.assertEqual(snapshot["status"], "done")
         self.assertEqual(snapshot["result"]["run_id"], "run-1")
+
+    def test_local_run_rejects_overlapping_job(self):
+        marker = "test-busy-job"
+        with server.LOCAL_RUN_LOCK:
+            server.LOCAL_RUN_JOBS[marker] = {"status": "running"}
+        try:
+            with self.assertRaisesRegex(RuntimeError, "已有本地整理任务运行中"):
+                server._start_local_run_job("另一个任务", False)
+        finally:
+            with server.LOCAL_RUN_LOCK:
+                server.LOCAL_RUN_JOBS.pop(marker, None)
 
     def test_list_run_summaries_paginates_three_per_page(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -293,6 +305,19 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(payload, "")
         self.assertIn("未确认分发权", status)
+
+    def test_delivery_payload_reports_quota_exhaustion(self):
+        payload, status = _delivery_payload(
+            {
+                "rights_review": "confirmed",
+                "member_delivery": {
+                    "status": "quota_exhausted",
+                    "message": "今日免费下载次数已用【15】，剩余【0】",
+                },
+            }
+        )
+        self.assertEqual(payload, "")
+        self.assertIn("剩余【0】", status)
 
     def test_read_output_item_prefers_saved_ai_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
