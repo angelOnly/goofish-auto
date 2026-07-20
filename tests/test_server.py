@@ -1,5 +1,6 @@
 import unittest
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -20,6 +21,12 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("refreshAll();", server.HTML)
         self.assertIn("refreshAll();", server.DASHBOARD_JS)
         self.assertIn("deliveryScreenshotHtml", server.DASHBOARD_JS)
+        self.assertIn("memberRequestBreakdown", server.DASHBOARD_JS)
+        self.assertIn("memberUnique", server.DASHBOARD_JS)
+        self.assertIn("sourceDuplicates", server.DASHBOARD_JS)
+        self.assertIn('id="memberCookie" type="password"', server.HTML)
+        self.assertIn("saveMemberCookieFromPage", server.DASHBOARD_JS)
+        self.assertIn("/api/local/member-cookie", server.DASHBOARD_JS)
         self.assertIn("join('\\n');", server.DASHBOARD_JS)
         self.assertNotIn("join('\n');", server.DASHBOARD_JS)
 
@@ -27,6 +34,37 @@ class ServerTests(unittest.TestCase):
         message = server._clean_error_message("<html><title>504 Gateway Time-out</title><body>openresty</body></html>")
         self.assertIn("504", message)
         self.assertNotIn("<html>", message)
+
+    def test_member_cookie_update_validates_persists_and_activates(self):
+        cookie = "PHPSESSID=session; wordpress_logged_in_test=jiangzb%7Ctoken"
+        task = {
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_path = Path(tmp) / ".theitzy_cookie"
+            with patch.dict(os.environ, {"THEITZY_COOKIE": "old-cookie"}):
+                with patch.object(server, "load_tasks", return_value=[task]), patch.object(
+                    server,
+                    "validate_member_cookie",
+                    return_value={"username": "jiangzb"},
+                ) as validate:
+                    result = server._save_member_cookie(cookie, cookie_path)
+                self.assertEqual(os.environ["THEITZY_COOKIE"], cookie)
+            self.assertEqual(cookie_path.read_text(encoding="utf-8"), cookie)
+        validate.assert_called_once_with(task, cookie_override=cookie)
+        self.assertEqual(result, {"configured": True, "username": "jiangzb"})
+        self.assertNotIn(cookie, json.dumps(result))
+
+    def test_member_cookie_update_rejects_newlines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "换行"):
+                server._save_member_cookie(
+                    "wordpress_logged_in_test=jiangzb%7Ctoken\nextra=value",
+                    Path(tmp) / ".theitzy_cookie",
+                )
 
     def test_local_run_job_finishes_in_background(self):
         with patch.object(server, "run_named_task", return_value={"run_id": "run-1", "count": 2, "diagnostics": {}}):
@@ -50,6 +88,22 @@ class ServerTests(unittest.TestCase):
         finally:
             with server.LOCAL_RUN_LOCK:
                 server.LOCAL_RUN_JOBS.pop(marker, None)
+
+    def test_local_run_request_id_is_idempotent(self):
+        request_id = "same-browser-request"
+        with patch.object(server, "run_named_task", return_value={"run_id": "run-1", "count": 1, "diagnostics": {}}) as run:
+            first = server._start_local_run_job("测试任务", False, request_id)
+            second = server._start_local_run_job("测试任务", False, request_id)
+            job_id = str(first["job_id"])
+            for _ in range(20):
+                snapshot = server._job_snapshot(job_id)
+                if snapshot.get("status") == "done":
+                    break
+                time.sleep(0.05)
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertEqual(run.call_count, 1)
+        with server.LOCAL_RUN_LOCK:
+            server.LOCAL_RUN_REQUESTS.pop(request_id, None)
 
     def test_list_run_summaries_paginates_three_per_page(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -318,6 +372,19 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(payload, "")
         self.assertIn("剩余【0】", status)
+
+    def test_delivery_payload_reports_request_budget_exhaustion(self):
+        payload, status = _delivery_payload(
+            {
+                "rights_review": "confirmed",
+                "member_delivery": {
+                    "status": "request_budget_exhausted",
+                    "message": "本次运行已达到会员请求预算（10 条）",
+                },
+            }
+        )
+        self.assertEqual(payload, "")
+        self.assertIn("预算（10 条）", status)
 
     def test_read_output_item_prefers_saved_ai_copy(self):
         with tempfile.TemporaryDirectory() as tmp:

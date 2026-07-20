@@ -61,6 +61,18 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(saved["forbidden_words"], ["chatgpt", "gpt", "OpenAI"])
         self.assertEqual(loaded["replacement"], "AI工具")
 
+    def test_saved_member_cookie_overrides_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_path = root / ".env"
+            cookie_path = root / "output" / pipeline.MEMBER_COOKIE_FILE.name
+            env_path.write_text("THEITZY_COOKIE='old-cookie'\n", encoding="utf-8")
+            cookie_path.parent.mkdir()
+            cookie_path.write_text("new-cookie", encoding="utf-8")
+            with patch.dict(os.environ, {"THEITZY_COOKIE": "process-cookie"}):
+                pipeline.load_env_file(env_path)
+                self.assertEqual(os.environ["THEITZY_COOKIE"], "new-cookie")
+
     def test_parse_post_extracts_cover_and_categories(self):
         raw = {
             "id": 1,
@@ -291,6 +303,90 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["count"], 0)
         self.assertTrue(submit_seen["value"])
 
+    def test_delivery_screenshot_reports_missing_browser_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("playwright.sync_api.sync_playwright") as sync_playwright:
+                sync_playwright.return_value.__enter__.return_value = SimpleNamespace(
+                    chromium=SimpleNamespace(
+                        launch=lambda **kwargs: (_ for _ in ()).throw(
+                            RuntimeError("Executable doesn't exist; run playwright install")
+                        )
+                    )
+                )
+                result = pipeline.capture_baidu_delivery_screenshots(
+                    {"member_delivery": {"links": ["https://pan.baidu.com/s/mock"]}},
+                    {"rights_confirmed": True, "source_config": {"capture_delivery_screenshots": True}},
+                    Path(tmp),
+                )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("playwright install chromium", result["message"])
+
+    @unittest.skipUnless(os.getenv("RUN_LIVE_THEITZY_TEST") == "1", "live TheItzy test")
+    def test_live_end_to_end_ai_engineering_delivery_and_screenshot(self):
+        """Spend exactly one member download request, then capture the Baidu detail page."""
+
+        pipeline.load_env_file()
+        self.assertTrue(
+            os.getenv("THEITZY_COOKIE", "").strip(),
+            "THEITZY_COOKIE is required in .env for the live test",
+        )
+        item = {
+            "id": "theitzy:end-to-end-ai-engineering",
+            "page_url": "https://theitzy.net/end-to-end-ai-engineering/",
+        }
+        task = {
+            "rights_confirmed": True,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+                "member_timeout": 45,
+                "capture_delivery_screenshots": True,
+                "delivery_screenshot_count": 1,
+                "delivery_screenshot_timeout": 45,
+            },
+        }
+        quota_state = {
+            "_requested_post_ids": set(),
+            "_delivery_cache": {},
+            "_ajax_request_count": 0,
+            "_ajax_request_budget": 1,
+        }
+        asset_dir = pipeline.OUTPUT_DIR / "live-test-end-to-end-ai-engineering" / "assets"
+
+        with pipeline._exclusive_run_lock(pipeline.OUTPUT_DIR):
+            pipeline.validate_member_cookie(task)
+            with patch.object(
+                pipeline, "http_form_json", wraps=pipeline.http_form_json
+            ) as ajax_request, patch.object(
+                pipeline, "http_text", wraps=pipeline.http_text
+            ) as text_request:
+                delivery = pipeline.fetch_member_delivery(item, task, [], quota_state)
+
+            self.assertIsInstance(delivery, dict)
+            self.assertEqual(ajax_request.call_count, 1)
+            self.assertEqual(quota_state["_ajax_request_count"], 1)
+            self.assertEqual(delivery.get("ajax_request_count"), 1)
+            links = [str(link) for link in delivery.get("links", [])]
+            self.assertTrue(
+                any("pan.baidu.com" in link.lower() for link in links),
+                delivery.get("message") or delivery.get("status"),
+            )
+
+            item["member_delivery"] = delivery
+            screenshot = pipeline.capture_baidu_delivery_screenshots(item, task, asset_dir)
+
+        go_requests = [call for call in text_request.call_args_list if call.kwargs.get("return_url")]
+        self.assertEqual(delivery.get("status"), "found", delivery.get("message"))
+        self.assertEqual(delivery.get("go_request_count"), 1)
+        self.assertEqual(len(go_requests), 1)
+        self.assertEqual(screenshot.get("status"), "found", screenshot.get("message"))
+        self.assertGreaterEqual(len(screenshot.get("paths", [])), 1)
+        for relative_path in screenshot["paths"]:
+            screenshot_path = pipeline.OUTPUT_DIR / relative_path
+            self.assertTrue(screenshot_path.is_file(), screenshot_path)
+            self.assertGreater(screenshot_path.stat().st_size, 0)
+
     def test_member_delivery_is_written_when_authorized_and_cookie_is_available(self):
         task = {
             "name": "会员链接测试",
@@ -361,6 +457,242 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(delivery["status"], "found")
         self.assertEqual(delivery["links"], ["https://pan.baidu.com/s/1RealLink"])
         self.assertIn("qa8i", delivery["passwords"])
+        self.assertEqual(delivery["ajax_request_count"], 1)
+        self.assertEqual(delivery["go_request_count"], 1)
+
+    def test_member_delivery_skips_duplicate_post_id_in_one_run(self):
+        task = {
+            "rights_confirmed": True,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+            },
+        }
+        item = {
+            "id": "theitzy:duplicate",
+            "source_id": 25611,
+            "page_url": "https://theitzy.net/course/",
+        }
+        page_html = (
+            '<script>var caozhuti={"ajaxurl":"https:\\/\\/theitzy.net\\/wp-admin\\/admin-ajax.php"}</script>'
+            '<a data-id="25611" class="go-down btn">立即下载</a>'
+        )
+        go_html = "<html>redirected</html>"
+        state = {}
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
+            with patch.object(
+                pipeline,
+                "http_text",
+                side_effect=[page_html, (go_html, "https://pan.baidu.com/s/1RealLink"), page_html],
+            ) as text:
+                with patch.object(
+                    pipeline,
+                    "http_form_json",
+                    return_value={"status": "1", "msg": "https://theitzy.net/go?post_id=25611"},
+                ) as ajax:
+                    first = pipeline.fetch_member_delivery(item, task, [], state)
+                    second = pipeline.fetch_member_delivery(item, task, [], state)
+        self.assertEqual(ajax.call_count, 1)
+        self.assertEqual(text.call_count, 3)
+        self.assertEqual(first["links"], ["https://pan.baidu.com/s/1RealLink"])
+        self.assertEqual(second["links"], first["links"])
+        self.assertTrue(second["duplicate_skipped"])
+        self.assertEqual(second["ajax_request_count"], 0)
+        self.assertEqual(second["go_request_count"], 0)
+
+    def test_member_delivery_request_budget_blocks_extra_ajax(self):
+        task = {
+            "rights_confirmed": True,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+            },
+        }
+        page_html = (
+            '<script>var caozhuti={"ajaxurl":"https:\\/\\/theitzy.net\\/wp-admin\\/admin-ajax.php"}</script>'
+            '<a data-id="1" class="go-down btn">立即下载</a>'
+        )
+        state = {
+            "_requested_post_ids": set(),
+            "_delivery_cache": {},
+            "_ajax_request_count": 0,
+            "_ajax_request_budget": 1,
+        }
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
+            with patch.object(pipeline, "http_text", return_value=page_html), patch.object(
+                pipeline,
+                "http_form_json",
+                return_value={"status": 0, "msg": "not available"},
+            ) as ajax:
+                first = pipeline.fetch_member_delivery(
+                    {"id": "one", "source_id": 1, "page_url": "https://theitzy.net/one/"},
+                    task,
+                    [],
+                    state,
+                )
+                second = pipeline.fetch_member_delivery(
+                    {"id": "two", "source_id": 2, "page_url": "https://theitzy.net/two/"},
+                    task,
+                    [],
+                    state,
+                )
+        self.assertEqual(ajax.call_count, 1)
+        self.assertEqual(first["ajax_request_count"], 1)
+        self.assertEqual(second["status"], "request_budget_exhausted")
+        self.assertEqual(second["ajax_request_count"], 0)
+
+    def test_run_deduplicates_different_item_ids_with_same_source_id(self):
+        task = {
+            "name": "同一文章不同ID防护",
+            "source": "theitzy",
+            "keywords": ["AI"],
+            "output_limit": 15,
+            "rights_confirmed": True,
+            "source_config": {"base_url": "https://theitzy.net", "fetch_member_delivery": True},
+        }
+        first = {
+            "id": "theitzy:one",
+            "source_id": 99,
+            "title": "AI 课程一",
+            "page_url": "https://theitzy.net/one/",
+            "published_at": "2999-01-01T00:00:00+00:00",
+            "categories": ["AI"],
+            "summary": "课程资料",
+            "cover_url": "",
+        }
+        second = {**first, "id": "theitzy:two", "title": "AI 课程重复"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pipeline, "fetch_source", return_value=[first, second]), patch.object(
+                pipeline, "validate_member_cookie", return_value={}
+            ), patch.object(
+                pipeline,
+                "fetch_member_delivery",
+                return_value={"status": "found", "links": ["https://pan.baidu.com/s/mock"], "request_count": 1},
+            ) as fetch_delivery:
+                summary = run_task(task, output_dir=Path(tmp))
+        self.assertEqual(summary["count"], 1)
+        self.assertEqual(fetch_delivery.call_count, 1)
+        self.assertEqual(summary["diagnostics"]["source_duplicate_count"], 1)
+
+    def test_run_deduplicates_source_ids_before_member_requests(self):
+        task = {
+            "name": "重复课程防护",
+            "source": "theitzy",
+            "keywords": ["AI"],
+            "rights_confirmed": True,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+            },
+        }
+        first = {
+            "id": "theitzy:1",
+            "source_id": 1,
+            "title": "AI 课程一",
+            "page_url": "https://theitzy.net/one/",
+            "published_at": "2999-01-01T00:00:00+00:00",
+            "categories": ["AI"],
+            "summary": "课程资料",
+            "cover_url": "",
+        }
+        second = {**first, "id": "theitzy:2", "source_id": 2, "title": "AI 课程二", "page_url": "https://theitzy.net/two/"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pipeline, "fetch_source", return_value=[first, first.copy(), second]), patch.object(
+                pipeline, "validate_member_cookie", return_value={}
+            ), patch.object(
+                pipeline,
+                "fetch_member_delivery",
+                return_value={
+                    "status": "found",
+                    "links": ["https://pan.baidu.com/s/mock"],
+                    "passwords": [],
+                    "request_count": 1,
+                    "ajax_request_count": 1,
+                    "go_request_count": 1,
+                    "request_trace": [{"stage": "user_down_ajax", "post_id": "1"}],
+                },
+            ) as fetch_delivery:
+                summary = run_task(task, output_dir=Path(tmp))
+        self.assertEqual(summary["count"], 2)
+        self.assertEqual(fetch_delivery.call_count, 2)
+        self.assertEqual(summary["diagnostics"]["source_raw_count"], 3)
+        self.assertEqual(summary["diagnostics"]["source_duplicate_count"], 1)
+        self.assertEqual(summary["diagnostics"]["member_delivery_request_count"], 2)
+
+    def test_single_run_requests_each_of_ten_courses_once(self):
+        task = {
+            "name": "十条请求计数",
+            "source": "theitzy",
+            "keywords": ["AI"],
+            "output_limit": 15,
+            "rights_confirmed": True,
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+                "member_request_interval_seconds": 0,
+            },
+        }
+        raw = [
+            {
+                "id": f"theitzy:{index}",
+                "source_id": index,
+                "title": f"AI 课程 {index}",
+                "page_url": f"https://theitzy.net/course/{index}/",
+                "published_at": "2999-01-01T00:00:00+00:00",
+                "categories": ["AI"],
+                "summary": "课程资料",
+                "cover_url": "",
+            }
+            for index in range(1, 11)
+        ]
+        page_html = (
+            '<script>var caozhuti={"ajaxurl":"https:\\/\\/theitzy.net\\/wp-admin\\/admin-ajax.php"}</script>'
+            '<a data-id="1" class="go-down btn">立即下载</a>'
+        )
+
+        def fake_http_text(url, **kwargs):
+            if "/go?post_id=" in url:
+                post_id = url.rsplit("=", 1)[-1]
+                return "<html>redirected</html>", f"https://pan.baidu.com/s/course{post_id}"
+            return page_html
+
+        def fake_ajax(url, data, **kwargs):
+            return {"status": "1", "msg": f"https://theitzy.net/go?post_id={data['post_id']}"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pipeline, "fetch_source", return_value=raw), patch.object(
+                pipeline, "validate_member_cookie", return_value={}
+            ), patch.object(pipeline, "load_env_file"), patch.dict(
+                os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}
+            ), patch.object(pipeline, "http_text", side_effect=fake_http_text) as text, patch.object(
+                pipeline, "http_form_json", side_effect=fake_ajax
+            ) as ajax:
+                summary = run_task(task, output_dir=Path(tmp))
+        diagnostics = summary["diagnostics"]
+        self.assertEqual(summary["count"], 10)
+        self.assertEqual(ajax.call_count, 10)
+        self.assertEqual(diagnostics["member_delivery_ajax_request_count"], 10)
+        self.assertEqual(diagnostics["member_delivery_go_request_count"], 10)
+        self.assertEqual(diagnostics["member_delivery_page_request_count"], 10)
+        self.assertEqual(diagnostics["member_delivery_request_budget"], 10)
+        self.assertEqual(diagnostics["member_delivery_ajax_request_budget_remaining"], 0)
+        self.assertFalse(diagnostics["member_delivery_request_budget_exhausted"])
+        self.assertEqual(len(diagnostics["member_delivery_unique_post_ids"]), 10)
+        self.assertEqual(
+            sum(event["stage"] == "user_down_ajax" for event in diagnostics["member_delivery_request_trace"]),
+            10,
+        )
+        self.assertEqual(text.call_count, 20)
+
+    def test_run_lock_blocks_a_second_process_in_same_output_dir(self):
+        task = {"name": "锁测试", "source": "theitzy", "keywords": ["AI"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            with pipeline._exclusive_run_lock(Path(tmp)):
+                with self.assertRaisesRegex(RuntimeError, "已有本地整理任务运行中"):
+                    run_task(task, output_dir=Path(tmp))
 
     def test_member_cookie_validation_blocks_invalid_login(self):
         task = {
@@ -373,6 +705,37 @@ class PipelineTests(unittest.TestCase):
             with patch.object(pipeline, "http_text", return_value='<form id="loginform"><input name="log"></form>'):
                 with self.assertRaises(RuntimeError):
                     validate_member_cookie(task)
+
+    def test_member_cookie_validation_rejects_logout_text_without_account(self):
+        task = {
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+            },
+        }
+        stale_page = "<html><script>const action = 'logout';</script><p>请浏览课程</p></html>"
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=jiangzb%7Ctoken"}):
+            with patch.object(pipeline, "http_text", return_value=stale_page):
+                with self.assertRaisesRegex(RuntimeError, "无法确认"):
+                    validate_member_cookie(task)
+
+    def test_member_cookie_validation_accepts_account_with_logout_link(self):
+        task = {
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+            },
+        }
+        member_page = (
+            '<a href="https://theitzy.net/user">jiangzb</a>'
+            '<a href="https://theitzy.net/wp-login.php?action=logout">退出登录</a>'
+        )
+        cookie = "wordpress_logged_in_test=jiangzb%7Cnew-token"
+        with patch.dict(os.environ, {"THEITZY_COOKIE": "wordpress_logged_in_test=old%7Ctoken"}):
+            with patch.object(pipeline, "http_text", return_value=member_page) as request:
+                result = validate_member_cookie(task, cookie_override=cookie)
+        self.assertEqual(result["username"], "jiangzb")
+        self.assertEqual(request.call_args.kwargs["headers"]["Cookie"], cookie)
 
     def test_member_cookie_validation_reports_gateway_errors_clearly(self):
         task = {

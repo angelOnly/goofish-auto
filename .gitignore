@@ -3,3 +3,5 @@ output/*
 !output/.gitkeep
 __pycache__/
 tests/__pycache__/
+闲鱼运营资料/
+*.mp4

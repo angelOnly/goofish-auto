@@ -18,7 +18,7 @@ import os
 import re
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -27,11 +27,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "output"
 TASKS_FILE = ROOT / "tasks.json"
 ENV_FILE = ROOT / ".env"
+MEMBER_COOKIE_FILE = OUTPUT_DIR / ".theitzy_cookie"
 CONTENT_RULES_FILE = OUTPUT_DIR / "content_rules.json"
 USER_AGENT = "XinliResourcePipeline/0.1 (local review; respects robots.txt)"
 LOGGER = logging.getLogger("goofish_auto.pipeline")
@@ -52,6 +58,43 @@ GENERIC_MARKET_TERMS = {
     "实战",
     "项目实战",
 }
+
+
+@contextmanager
+def _exclusive_run_lock(output_dir: Path):
+    """Prevent two processes from spending the same member quota at once."""
+
+    # ponytail: one global output lock; split by account only if multi-account support is added.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = (output_dir / ".run.lock").open("a+b")
+    locked = False
+    try:
+        lock_file.seek(0, 2)
+        if lock_file.tell() == 0:
+            lock_file.write(b"0")
+            lock_file.flush()
+        lock_file.seek(0)
+        try:
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except (BlockingIOError, OSError) as exc:
+            raise RuntimeError("已有本地整理任务运行中，请等待完成后再启动") from exc
+        yield
+    finally:
+        if locked:
+            try:
+                if os.name == "nt":
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+        else:
+            lock_file.close()
 
 
 def utc_now() -> datetime:
@@ -161,29 +204,33 @@ def parse_metric(value: Any) -> float:
 
 
 def load_env_file(path: Path = ENV_FILE) -> None:
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"\'')
-        reloadable_keys = {
-            "THEITZY_COOKIE",
-            "OPENAI_API_KEY",
-            "OPENAI_BASE_URL",
-            "OPENAI_MODEL",
-            "OPENAI_MODEL_NAME",
-            "AI_API_KEY",
-            "AI_BASE_URL",
-            "AI_MODEL",
-        }
-        if key in reloadable_keys:
-            os.environ[key] = value
-        else:
-            os.environ.setdefault(key, value)
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"\'')
+            reloadable_keys = {
+                "THEITZY_COOKIE",
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+                "OPENAI_MODEL",
+                "OPENAI_MODEL_NAME",
+                "AI_API_KEY",
+                "AI_BASE_URL",
+                "AI_MODEL",
+            }
+            if key in reloadable_keys:
+                os.environ[key] = value
+            else:
+                os.environ.setdefault(key, value)
+    saved_cookie_path = path.parent / "output" / MEMBER_COOKIE_FILE.name
+    if saved_cookie_path.is_file():
+        saved_cookie = saved_cookie_path.read_text(encoding="utf-8").strip()
+        if saved_cookie:
+            os.environ["THEITZY_COOKIE"] = saved_cookie
 
 
 def http_text(
@@ -239,12 +286,14 @@ def _wordpress_cookie_username(cookie: str) -> str:
     return value.split("|", 1)[0].strip()
 
 
-def validate_member_cookie(task: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def validate_member_cookie(
+    task: Dict[str, Any], *, cookie_override: Optional[str] = None
+) -> Optional[Dict[str, str]]:
     source_config = task.get("source_config") or {}
     if not source_config.get("fetch_member_delivery"):
         return None
     cookie_env = str(source_config.get("member_cookie_env") or "THEITZY_COOKIE")
-    cookie = os.getenv(cookie_env, "").strip()
+    cookie = str(cookie_override).strip() if cookie_override is not None else os.getenv(cookie_env, "").strip()
     if not cookie:
         raise RuntimeError(f"会员链接抓取已开启，但未设置 {cookie_env}。请在本机 .env 或环境变量里填写 TheItzy 登录 Cookie。")
     if "wordpress_logged_in_" not in cookie:
@@ -275,15 +324,14 @@ def validate_member_cookie(task: Dict[str, Any]) -> Optional[Dict[str, str]]:
         raise RuntimeError(f"无法访问 TheItzy 会员校验页：{exc}") from exc
     username = _wordpress_cookie_username(cookie)
     haystack = f"{content}\n{strip_html(content, 20000)}".lower()
-    configured_markers = [str(value).strip() for value in source_config.get("member_cookie_valid_markers", []) if str(value).strip()]
-    valid_markers = configured_markers or [value for value in [username, "logout", "退出"] if value]
-    if any(marker.lower() in haystack for marker in valid_markers):
-        return {"cookie_env": cookie_env, "check_url": check_url, "username": username}
-
-    invalid_markers = ["wp-login.php", "name=\"log\"", "用户登录", "登录后", "请登录", "loginform"]
+    invalid_markers = ["name=\"log\"", "用户登录", "登录后", "请登录", "loginform"]
     if any(marker.lower() in haystack for marker in invalid_markers):
         raise RuntimeError(f"{cookie_env} 已失效或未登录 TheItzy；请重新从浏览器复制 Cookie 后再运行本地资源整理。")
-    raise RuntimeError(f"无法确认 {cookie_env} 是否有效：会员校验页没有出现登录用户名或退出标识。")
+    configured_markers = [str(value).strip() for value in source_config.get("member_cookie_valid_markers", []) if str(value).strip()]
+    valid_markers = configured_markers or [username]
+    if any(marker and marker.lower() in haystack for marker in valid_markers):
+        return {"cookie_env": cookie_env, "check_url": check_url, "username": username}
+    raise RuntimeError(f"无法确认 {cookie_env} 是否有效：会员校验页没有出现登录用户名或配置的有效标识。")
 
 
 def get_first(mapping: Dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
@@ -394,6 +442,15 @@ def _download_quota_exhausted(message: str) -> bool:
         "下载" in text
         and re.search(r"(?:剩余|余量)[^\d]{0,8}0(?:\D|$)", text)
     )
+
+
+def _normalise_member_post_id(value: Any) -> str:
+    """Use one stable key for a course across API/page representations."""
+
+    text = str(value or "").strip()
+    if text.isdigit():
+        return str(int(text))
+    return text
 
 
 def extract_member_download_context(content_html: str, page_url: str) -> Dict[str, str]:
@@ -1381,8 +1438,18 @@ def capture_baidu_delivery_screenshots(item: Dict[str, Any], task: Dict[str, Any
             browser.close()
         return {"status": "found", "paths": paths, "url": final_url, "count": len(paths)}
     except Exception as exc:
+        message = str(exc)
+        if "Executable doesn't exist" in message or "playwright install" in message.lower():
+            LOGGER.warning("delivery screenshot unavailable course_id=%s: Chromium is not installed", item.get("id"))
+            return {
+                "status": "unavailable",
+                "paths": paths,
+                "url": url,
+                "count": len(paths),
+                "message": "Playwright Chromium 未安装，请执行 python -m playwright install chromium。",
+            }
         LOGGER.exception("delivery screenshot failed course_id=%s", item.get("id"))
-        return {"status": "error", "paths": paths, "url": url, "count": len(paths), "message": str(exc)}
+        return {"status": "error", "paths": paths, "url": url, "count": len(paths), "message": message}
 
 def fetch_member_delivery(
     item: Dict[str, Any],
@@ -1409,6 +1476,10 @@ def fetch_member_delivery(
             "source_url": item.get("page_url", ""),
             "message": str(quota_state.get("message") or "今日下载额度已用完。"),
             "request_count": 0,
+            "ajax_request_count": 0,
+            "go_request_count": 0,
+            "member_page_request_count": 0,
+            "request_trace": [],
         }
     page_url = str(item.get("page_url") or "")
     if not page_url:
@@ -1426,8 +1497,13 @@ def fetch_member_delivery(
     interval = float(source_config.get("member_request_interval_seconds", source_config.get("request_interval_seconds", 10)))
     timeout = int(source_config.get("member_timeout", 30))
     request_count = 0
+    go_request_count = 0
+    member_page_request_count = 0
+    request_trace: List[Dict[str, Any]] = []
     try:
         sleep_between_requests(last_request, interval)
+        member_page_request_count = 1
+        request_trace.append({"stage": "member_page", "course_id": str(item.get("id") or "")})
         content = http_text(
             page_url,
             timeout=timeout,
@@ -1441,56 +1517,121 @@ def fetch_member_delivery(
         delivery = extract_baidu_delivery_from_html(content, page_url)
         if not delivery.get("links"):
             context = extract_member_download_context(content, page_url)
-            post_id = str(item.get("source_id") or "").strip() or context.get("post_id", "")
+            post_id = _normalise_member_post_id(item.get("source_id")) or _normalise_member_post_id(
+                context.get("post_id", "")
+            )
             ajax_url = context.get("ajax_url", "")
             if post_id and ajax_url:
-                request_count = 1
-                ajax_payload = http_form_json(
-                    ajax_url,
-                    {"action": "user_down_ajax", "post_id": post_id},
-                    timeout=timeout,
-                    headers={
-                        "Cookie": cookie,
-                        "Referer": page_url,
-                    },
+                requested_post_ids = (
+                    quota_state.setdefault("_requested_post_ids", set()) if quota_state is not None else set()
                 )
-                ajax_msg = str(ajax_payload.get("msg") or "")
-                if _download_quota_exhausted(ajax_msg):
-                    delivery["status"] = "quota_exhausted"
-                    delivery["message"] = ajax_msg
+                if not isinstance(requested_post_ids, set):
+                    requested_post_ids = set(str(value) for value in requested_post_ids)
                     if quota_state is not None:
-                        quota_state.update({"exhausted": True, "message": ajax_msg})
+                        quota_state["_requested_post_ids"] = requested_post_ids
+                delivery_cache = quota_state.setdefault("_delivery_cache", {}) if quota_state is not None else {}
+                if not isinstance(delivery_cache, dict):
+                    delivery_cache = {}
+                    if quota_state is not None:
+                        quota_state["_delivery_cache"] = delivery_cache
+                if post_id in requested_post_ids:
+                    cached_delivery = delivery_cache.get(post_id)
+                    if isinstance(cached_delivery, dict):
+                        delivery = {**cached_delivery, "duplicate_skipped": True}
+                    else:
+                        delivery["status"] = "duplicate_skipped"
+                        delivery["message"] = "本次运行已请求过该课程，已跳过重复下载请求。"
+                    request_trace.append({"stage": "duplicate_skipped", "post_id": post_id})
                 else:
-                    ajax_delivery = extract_baidu_delivery_from_html(ajax_msg, page_url)
-                    if not ajax_delivery.get("links") and ajax_payload.get("status") in {1, "1"} and ajax_msg:
-                        go_url = urljoin(page_url, _decode_js_url(ajax_msg))
-                        go_result = http_text(
-                            go_url,
+                    request_budget = None
+                    request_total = 0
+                    if quota_state is not None:
+                        raw_budget = quota_state.get("_ajax_request_budget")
+                        try:
+                            request_budget = max(0, int(raw_budget)) if raw_budget is not None else None
+                        except (TypeError, ValueError):
+                            request_budget = None
+                        try:
+                            request_total = max(0, int(quota_state.get("_ajax_request_count") or 0))
+                        except (TypeError, ValueError):
+                            request_total = 0
+                    if request_budget is not None and request_total >= request_budget:
+                        delivery["status"] = "request_budget_exhausted"
+                        delivery["message"] = (
+                            f"本次运行已达到会员请求预算（{request_budget} 条），已跳过额外下载请求。"
+                        )
+                        request_trace.append(
+                            {
+                                "stage": "request_budget_skipped",
+                                "post_id": post_id,
+                                "budget": request_budget,
+                            }
+                        )
+                        if quota_state is not None:
+                            quota_state["_ajax_budget_exhausted"] = True
+                    else:
+                        # Mark before the network call.  If the server processed the
+                        # request but the client timed out, a retry in this run must
+                        # still be treated as a duplicate.
+                        requested_post_ids.add(post_id)
+                        if quota_state is not None:
+                            quota_state["_ajax_request_count"] = request_total + 1
+                        request_count = 1
+                        request_trace.append({"stage": "user_down_ajax", "post_id": post_id})
+                        ajax_payload = http_form_json(
+                            ajax_url,
+                            {"action": "user_down_ajax", "post_id": post_id},
                             timeout=timeout,
                             headers={
-                                "Accept": "text/html",
                                 "Cookie": cookie,
                                 "Referer": page_url,
                             },
-                            return_url=True,
                         )
-                        if isinstance(go_result, tuple):
-                            go_content, final_url = go_result
-                        else:  # kept for patched/test transports
-                            go_content, final_url = str(go_result), ""
-                        ajax_delivery = extract_baidu_delivery_from_html(go_content, final_url or go_url)
-                        if _is_baidu_share_url(final_url):
-                            ajax_delivery = _merge_delivery(
-                                ajax_delivery,
-                                {"status": "found", "links": [final_url], "passwords": [], "source_url": final_url},
-                            )
-                    if ajax_delivery.get("links"):
-                        delivery = _merge_delivery(delivery, ajax_delivery)
-                    elif ajax_payload.get("msg"):
-                        delivery["message"] = ajax_msg
+                        ajax_msg = str(ajax_payload.get("msg") or "")
+                        if _download_quota_exhausted(ajax_msg):
+                            delivery["status"] = "quota_exhausted"
+                            delivery["message"] = ajax_msg
+                            if quota_state is not None:
+                                quota_state.update({"exhausted": True, "message": ajax_msg})
+                        else:
+                            ajax_delivery = extract_baidu_delivery_from_html(ajax_msg, page_url)
+                            if not ajax_delivery.get("links") and ajax_payload.get("status") in {1, "1"} and ajax_msg:
+                                go_url = urljoin(page_url, _decode_js_url(ajax_msg))
+                                go_request_count = 1
+                                request_trace.append({"stage": "go", "post_id": post_id})
+                                go_result = http_text(
+                                    go_url,
+                                    timeout=timeout,
+                                    headers={
+                                        "Accept": "text/html",
+                                        "Cookie": cookie,
+                                        "Referer": page_url,
+                                    },
+                                    return_url=True,
+                                )
+                                if isinstance(go_result, tuple):
+                                    go_content, final_url = go_result
+                                else:  # kept for patched/test transports
+                                    go_content, final_url = str(go_result), ""
+                                ajax_delivery = extract_baidu_delivery_from_html(go_content, final_url or go_url)
+                                if _is_baidu_share_url(final_url):
+                                    ajax_delivery = _merge_delivery(
+                                        ajax_delivery,
+                                        {"status": "found", "links": [final_url], "passwords": [], "source_url": final_url},
+                                    )
+                            if ajax_delivery.get("links"):
+                                delivery = _merge_delivery(delivery, ajax_delivery)
+                            elif ajax_payload.get("msg"):
+                                delivery["message"] = ajax_msg
+                        if quota_state is not None:
+                            delivery_cache[post_id] = dict(delivery)
             else:
                 delivery["message"] = "页面没有找到下载按钮 data-id 或 ajaxurl。"
         delivery["request_count"] = request_count
+        delivery["ajax_request_count"] = request_count
+        delivery["go_request_count"] = go_request_count
+        delivery["member_page_request_count"] = member_page_request_count
+        delivery["request_trace"] = request_trace
         LOGGER.info(
             "member_delivery fetched course_id=%s status=%s links=%s",
             item.get("id"),
@@ -1507,6 +1648,10 @@ def fetch_member_delivery(
             "source_url": page_url,
             "message": str(exc),
             "request_count": request_count,
+            "ajax_request_count": request_count,
+            "go_request_count": go_request_count,
+            "member_page_request_count": member_page_request_count,
+            "request_trace": request_trace,
         }
 
 
@@ -1524,13 +1669,21 @@ def format_delivery_links(item: Dict[str, Any], task: Dict[str, Any]) -> str:
     if owned_links:
         return "\n".join(f"- {link}" for link in owned_links)
 
-    if member_delivery and member_delivery.get("status") in {"missing_cookie", "not_found", "error", "missing_page_url", "quota_exhausted"}:
+    if member_delivery and member_delivery.get("status") in {
+        "missing_cookie",
+        "not_found",
+        "error",
+        "missing_page_url",
+        "quota_exhausted",
+        "request_budget_exhausted",
+    }:
         status_text = {
             "missing_cookie": member_delivery.get("message") or "未设置会员 Cookie，无法请求会员页。",
             "not_found": member_delivery.get("message") or "会员页中没有识别到百度网盘链接。",
             "error": f"会员页请求失败：{member_delivery.get('message') or '未知错误'}",
             "missing_page_url": "缺少课程页地址，无法请求会员页。",
             "quota_exhausted": member_delivery.get("message") or "今日会员下载额度已用完，请明天再试。",
+            "request_budget_exhausted": member_delivery.get("message") or "本次运行已达到会员请求预算，已跳过额外请求。",
         }.get(str(member_delivery.get("status")), "")
         return f"- 待填入你自己的授权网盘链接\n- 会员链接抓取状态：{status_text}"
 
@@ -1907,7 +2060,7 @@ def set_course_published(course_id: str, published: bool, db_path: Path) -> Dict
     return get_selection_statuses([course_id], db_path).get(course_id, {"published": published})
 
 
-def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_seen: bool = False) -> Dict[str, Any]:
+def _run_task_unlocked(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_seen: bool = False) -> Dict[str, Any]:
     load_env_file()
     output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / "state.json"
@@ -1964,7 +2117,38 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         error=market_data.get("error", ""),
     )
     raw_items = fetch_source(task)
-    note("source_fetched", fetched_count=len(raw_items))
+    source_raw_count = len(raw_items)
+    source_duplicate_ids: List[str] = []
+    source_duplicate_keys: List[str] = []
+    seen_source_keys: set[str] = set()
+    seen_item_ids: set[str] = set()
+    unique_raw_items: List[Dict[str, Any]] = []
+    for raw in raw_items:
+        item_id = str(raw.get("id") or "").strip()
+        source_id = _normalise_member_post_id(raw.get("source_id"))
+        dedupe_key = f"source:{source_id}" if source_id else (f"item:{item_id}" if item_id else "")
+        duplicate_item = bool(item_id and item_id in seen_item_ids)
+        duplicate_source = bool(dedupe_key and dedupe_key in seen_source_keys)
+        if duplicate_item or duplicate_source:
+            source_duplicate_ids.append(item_id or source_id)
+            source_duplicate_keys.append(
+                f"item:{item_id}" if duplicate_item else dedupe_key
+            )
+            continue
+        if item_id:
+            seen_item_ids.add(item_id)
+        if dedupe_key:
+            seen_source_keys.add(dedupe_key)
+        unique_raw_items.append(raw)
+    raw_items = unique_raw_items
+    note(
+        "source_fetched",
+        fetched_count=source_raw_count,
+        unique_count=len(raw_items),
+        duplicate_count=len(source_duplicate_ids),
+        duplicate_ids=source_duplicate_ids[:20],
+        duplicate_keys=source_duplicate_keys[:20],
+    )
 
     skipped_published = 0
     skipped_old = 0
@@ -2017,6 +2201,10 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
 
     diagnostics = {
         "fetched_count": len(raw_items),
+        "source_raw_count": source_raw_count,
+        "source_duplicate_count": len(source_duplicate_ids),
+        "source_duplicate_ids": source_duplicate_ids[:20],
+        "source_duplicate_keys": source_duplicate_keys[:20],
         "skipped_seen_count": skipped_published,
         "skipped_published_count": skipped_published,
         "skipped_old_count": skipped_old,
@@ -2051,6 +2239,8 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     note(
         "selection_done",
         fetched_count=diagnostics["fetched_count"],
+        source_raw_count=diagnostics["source_raw_count"],
+        source_duplicate_count=diagnostics["source_duplicate_count"],
         skipped_published_count=skipped_published,
         skipped_old_count=skipped_old,
         skipped_excluded_count=skipped_excluded,
@@ -2068,15 +2258,50 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     reuse_unpublished = bool(task.get("reuse_unpublished_selections", True))
     cached_items = get_cached_unpublished_items(item_ids, db_path) if reuse_unpublished else {}
     source_config = task.get("source_config") or {}
+    member_delivery_request_budget = len(items) if source_config.get("fetch_member_delivery") else 0
     member_delivery_last_request: List[float] = []
-    member_delivery_quota_state: Dict[str, Any] = {}
+    member_delivery_quota_state: Dict[str, Any] = {
+        "_requested_post_ids": set(),
+        "_delivery_cache": {},
+        "_ajax_request_count": 0,
+        "_ajax_request_budget": member_delivery_request_budget,
+    }
     member_delivery_request_count = 0
+    member_delivery_ajax_request_count = 0
+    member_delivery_go_request_count = 0
+    member_delivery_page_request_count = 0
+    member_delivery_duplicate_skip_count = 0
+    member_delivery_request_budget_skip_count = 0
+    member_delivery_request_trace: List[Dict[str, Any]] = []
+
+    def record_member_delivery(value: Optional[Dict[str, Any]]) -> None:
+        nonlocal member_delivery_request_count
+        nonlocal member_delivery_ajax_request_count, member_delivery_go_request_count
+        nonlocal member_delivery_page_request_count, member_delivery_duplicate_skip_count
+        nonlocal member_delivery_request_budget_skip_count
+        if not isinstance(value, dict):
+            return
+        member_delivery_request_count += int(value.get("request_count") or 0)
+        member_delivery_ajax_request_count += int(value.get("ajax_request_count") or 0)
+        member_delivery_go_request_count += int(value.get("go_request_count") or 0)
+        member_delivery_page_request_count += int(value.get("member_page_request_count") or 0)
+        trace = value.get("request_trace") or []
+        if isinstance(trace, list):
+            member_delivery_request_trace.extend(event for event in trace if isinstance(event, dict))
+            member_delivery_duplicate_skip_count += sum(
+                1 for event in trace if isinstance(event, dict) and event.get("stage") == "duplicate_skipped"
+            )
+            member_delivery_request_budget_skip_count += sum(
+                1
+                for event in trace
+                if isinstance(event, dict) and event.get("stage") == "request_budget_skipped"
+            )
+
     enriched_items: List[Dict[str, Any]] = []
 
     for item in items:
         course_id = str(item.get("id") or "")
         cached = cached_items.get(course_id)
-        member_delivery_checked = False
         if cached and should_reuse_cached_item(cached, task):
             item = _merge_cached_item(cached, item)
             if item.get("copy_version") != COPY_VERSION or (
@@ -2091,30 +2316,20 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
             item["cover_local_path"] = download_authorized_cover(item, task, asset_dir)
             item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
             item["delivery_links"] = list(task.get("owned_delivery_links", []))
-            member_delivery = fetch_member_delivery(
-                item,
-                task,
-                member_delivery_last_request,
-                member_delivery_quota_state,
-            )
-            member_delivery_request_count += int((member_delivery or {}).get("request_count") or 0)
-            member_delivery_checked = True
-            if member_delivery is not None:
-                item["member_delivery"] = member_delivery
             ai_copy = maybe_ai_copy(item, task)
             item["copy"] = ai_copy or template_copy(item, task)
             item["copy_source"] = "ai" if ai_copy else "template"
             item["copy_version"] = COPY_VERSION
         item["rights_review"] = "confirmed" if task.get("rights_confirmed") else "required"
         item["delivery_links"] = list(task.get("owned_delivery_links", []))
-        if source_config.get("fetch_member_delivery") and not member_delivery_checked and not isinstance(item.get("member_delivery"), dict):
+        if source_config.get("fetch_member_delivery") and not isinstance(item.get("member_delivery"), dict):
             member_delivery = fetch_member_delivery(
                 item,
                 task,
                 member_delivery_last_request,
                 member_delivery_quota_state,
             )
-            member_delivery_request_count += int((member_delivery or {}).get("request_count") or 0)
+            record_member_delivery(member_delivery)
             if member_delivery is not None:
                 item["member_delivery"] = member_delivery
         screenshot_enabled, _, _ = _delivery_screenshot_config(task)
@@ -2137,6 +2352,27 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         if isinstance(item.get("member_delivery"), dict) and item["member_delivery"].get("links")
     )
     diagnostics["member_delivery_request_count"] = member_delivery_request_count
+    diagnostics["member_delivery_ajax_request_count"] = member_delivery_ajax_request_count
+    diagnostics["member_delivery_go_request_count"] = member_delivery_go_request_count
+    diagnostics["member_delivery_page_request_count"] = member_delivery_page_request_count
+    diagnostics["member_delivery_duplicate_skip_count"] = member_delivery_duplicate_skip_count
+    diagnostics["member_delivery_request_budget_skip_count"] = member_delivery_request_budget_skip_count
+    diagnostics["member_delivery_request_budget"] = member_delivery_request_budget
+    diagnostics["member_delivery_request_budget_exhausted"] = bool(
+        member_delivery_quota_state.get("_ajax_budget_exhausted")
+    )
+    diagnostics["member_delivery_ajax_request_budget_remaining"] = max(
+        0,
+        member_delivery_request_budget - member_delivery_ajax_request_count,
+    )
+    diagnostics["member_delivery_request_trace"] = member_delivery_request_trace
+    diagnostics["member_delivery_unique_post_ids"] = sorted(
+        {
+            str(event.get("post_id"))
+            for event in member_delivery_request_trace
+            if event.get("stage") == "user_down_ajax" and event.get("post_id")
+        }
+    )
     diagnostics["member_delivery_quota_exhausted"] = bool(member_delivery_quota_state.get("exhausted"))
     diagnostics["delivery_screenshot_item_count"] = sum(
         1 for item in items if (item.get("delivery_screenshots") or {}).get("paths")
@@ -2156,6 +2392,12 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
         reused_unpublished_count=diagnostics["reused_unpublished_count"],
         member_delivery_found_count=diagnostics["member_delivery_found_count"],
         member_delivery_request_count=diagnostics["member_delivery_request_count"],
+        member_delivery_ajax_request_count=diagnostics["member_delivery_ajax_request_count"],
+        member_delivery_go_request_count=diagnostics["member_delivery_go_request_count"],
+        member_delivery_duplicate_skip_count=diagnostics["member_delivery_duplicate_skip_count"],
+        member_delivery_request_budget_skip_count=diagnostics["member_delivery_request_budget_skip_count"],
+        member_delivery_request_budget=diagnostics["member_delivery_request_budget"],
+        member_delivery_request_budget_exhausted=diagnostics["member_delivery_request_budget_exhausted"],
         member_delivery_quota_exhausted=diagnostics["member_delivery_quota_exhausted"],
         delivery_screenshot_item_count=diagnostics["delivery_screenshot_item_count"],
         delivery_screenshot_count=diagnostics["delivery_screenshot_count"],
@@ -2239,6 +2481,11 @@ def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_see
     )
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
+
+
+def run_task(task: Dict[str, Any], *, output_dir: Path = OUTPUT_DIR, include_seen: bool = False) -> Dict[str, Any]:
+    with _exclusive_run_lock(output_dir):
+        return _run_task_unlocked(task, output_dir=output_dir, include_seen=include_seen)
 
 
 def run_named_task(name: str, *, include_seen: bool = False, output_dir: Path = OUTPUT_DIR) -> Dict[str, Any]:

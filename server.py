@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 LOGGER = logging.getLogger("goofish_auto.server")
 LOCAL_RUN_JOBS: dict[str, dict[str, object]] = {}
+LOCAL_RUN_REQUESTS: dict[str, str] = {}
 LOCAL_RUN_LOCK = threading.Lock()
 
 try:
@@ -27,6 +28,7 @@ try:
         load_specs,
     )
     from .pipeline import (
+        MEMBER_COOKIE_FILE,
         OUTPUT_DIR,
         apply_content_rules,
         get_selection_statuses,
@@ -37,10 +39,12 @@ try:
         selection_db_path,
         set_course_published,
         template_copy,
+        validate_member_cookie,
     )
 except ImportError:  # direct invocation from the project root
     from goofish_tasks import DEFAULT_BASE_URL, GoofishAPIError, GoofishClient, create_from_specs, load_specs
     from pipeline import (
+        MEMBER_COOKIE_FILE,
         OUTPUT_DIR,
         apply_content_rules,
         get_selection_statuses,
@@ -51,6 +55,7 @@ except ImportError:  # direct invocation from the project root
         selection_db_path,
         set_course_published,
         template_copy,
+        validate_member_cookie,
     )
 
 
@@ -128,6 +133,15 @@ a{color:var(--blue);text-decoration:none}.pill{display:inline-flex;align-items:c
         <button id="runBtn">运行一次</button>
       </div>
       <div class="help">这里是本地 TheItzy 元数据整理，只保留一个“AI虚拟课程选品整理”任务；本地资源池不按发布时间硬过滤，会按课程/教程/资料/项目实战类内容筛选，并排除远程安装、账号卡密和实体商品。下面的“闲鱼热点监控”分成新品监控和热度监控两条轨道。</div>
+      <details class="help">
+        <summary><strong>TheItzy 会员 Cookie 更新</strong></summary>
+        <p class="tiny">登录 TheItzy 后粘贴完整 Cookie。系统会先验证登录态，成功后立即生效并持久保存；页面和接口不会回显 Cookie。</p>
+        <div class="row">
+          <input id="memberCookie" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新的完整 Cookie" style="min-width:420px;flex:1">
+          <button class="secondary mini" id="saveMemberCookieBtn">验证并保存</button>
+        </div>
+        <div id="memberCookieStatus" class="status"></div>
+      </details>
       <details class="help">
         <summary><strong>文案禁用词配置</strong></summary>
         <p class="tiny">生成、展示、复制闲鱼文案时都会替换这些词；一行一个或用逗号分隔。</p>
@@ -285,13 +299,22 @@ function renderDiagnostics(data){
   const reused = d.reused_unpublished_count ? `；复用未发布缓存 ${esc(d.reused_unpublished_count)} 条` : '';
   const memberDelivery = d.member_delivery_found_count ? `；会员网盘链接 ${esc(d.member_delivery_found_count)} 条` : '';
   const memberRequests = d.member_delivery_request_count ? `；会员下载请求 ${esc(d.member_delivery_request_count)} 次` : '';
+  const memberRequestBreakdown = (d.member_delivery_ajax_request_count || d.member_delivery_go_request_count || d.member_delivery_duplicate_skip_count || d.member_delivery_request_budget_skip_count)
+    ? `（AJAX ${esc(d.member_delivery_ajax_request_count ?? 0)}；/go ${esc(d.member_delivery_go_request_count ?? 0)}；重复跳过 ${esc(d.member_delivery_duplicate_skip_count ?? 0)}；预算跳过 ${esc(d.member_delivery_request_budget_skip_count ?? 0)}）`
+    : '';
+  const memberBudget = d.member_delivery_request_budget ? `；会员请求预算 ${esc(d.member_delivery_request_budget)} 条` : '';
+  const memberBudgetWarning = d.member_delivery_request_budget_exhausted ? '；已阻止超预算请求' : '';
+  const memberUniqueCount = Array.isArray(d.member_delivery_unique_post_ids) ? d.member_delivery_unique_post_ids.length : null;
+  const memberUnique = memberUniqueCount !== null ? `；唯一课程 ${esc(memberUniqueCount)} 条` : '';
+  const sourceDuplicates = d.source_duplicate_count ? `；源数据重复 ${esc(d.source_duplicate_count)} 条，已去重` : '';
+  const outputLimit = d.output_limit ? `；单次上限 ${esc(d.output_limit)} 条` : '';
   const memberQuota = d.member_delivery_quota_exhausted ? '；今日会员下载额度已用完' : '';
   const screenshots = d.delivery_screenshot_count ? `; delivery screenshots ${esc(d.delivery_screenshot_count)}` : '';
   const screenshotErrors = d.delivery_screenshot_error_count ? `; screenshot failures ${esc(d.delivery_screenshot_error_count)}` : '';
   const cookieValid = d.member_cookie_validated ? '；会员 Cookie 已校验' : '';
   const aiCopy = d.ai_model ? `；AI文案 ${esc(d.ai_copy_count ?? 0)} 条（${esc(d.ai_model)}）` : '';
   const marketError = d.market_error ? `<p class="warn">闲鱼市场信号读取失败：${esc(d.market_error)}</p>` : '';
-  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${market}${cookieValid}${reused}${memberDelivery}${memberRequests}${memberQuota}${screenshots}${screenshotErrors}${aiCopy}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
+  return `<div class="help"><h3>运行诊断</h3>${zero}${fallback}${marketError}<p>抓取 ${esc(d.fetched_count ?? 0)} 条${sourceDuplicates}；已发布过滤 ${esc(d.skipped_published_count ?? d.skipped_seen_count ?? 0)} 条${age}${excluded}；候选 ${esc(d.candidate_count ?? 0)} 条；关键词命中 ${esc(d.matched_count ?? 0)} 条${outputLimit}${market}${cookieValid}${reused}${memberDelivery}${memberRequests}${memberRequestBreakdown}${memberUnique}${memberBudget}${memberBudgetWarning}${memberQuota}${screenshots}${screenshotErrors}${aiCopy}；最终输出 ${esc(d.selected_count ?? data.count ?? 0)} 条。</p>${top ? `<ul>${top}</ul>` : ''}</div>`;
 }
 function detailRowFor(folder){
   return [...document.querySelectorAll('.inline-detail-row')].find(row => row.dataset.detailFor === folder);
@@ -375,6 +398,27 @@ async function loadLocalTasks(){
   const tasks = await api('/api/local/tasks');
   $('localTask').innerHTML = tasks.map(t => `<option>${esc(t.name)}</option>`).join('');
 }
+async function saveMemberCookieFromPage(){
+  const input = $('memberCookie');
+  const button = $('saveMemberCookieBtn');
+  const cookie = input.value.trim();
+  if(!cookie){ setStatus('memberCookieStatus','请先粘贴新的 Cookie。','warn'); return; }
+  button.disabled = true;
+  setStatus('memberCookieStatus','正在验证登录态...');
+  try{
+    const result = await api('/api/local/member-cookie',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cookie})
+    });
+    input.value = '';
+    setStatus('memberCookieStatus',`Cookie 已更新并立即生效${result.username ? `，账号：${result.username}` : ''}。`,'ok');
+  }catch(e){
+    setStatus('memberCookieStatus', e.message, 'bad');
+  }finally{
+    button.disabled = false;
+  }
+}
 async function loadContentRules(){
   const rules = await api('/api/local/content-rules');
   $('forbiddenWords').value = (rules.forbidden_words || []).join('\\n');
@@ -423,7 +467,8 @@ async function loadRuns(page=runsPage){
 async function runLocalTask(){
   const btn=$('runBtn'); btn.disabled=true; setStatus('localStatus','运行中，请稍等...');
   try{
-    const data = await api('/api/local/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:$('localTask').value,include_seen:$('includeSeen').checked})});
+    const requestId = (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+    const data = await api('/api/local/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:$('localTask').value,include_seen:$('includeSeen').checked,request_id:requestId})});
     const result = data.job_id ? await waitLocalRun(data.job_id, data.started_at) : data;
     const reason = result.diagnostics?.zero_reason;
     if((result.count || 0) === 0 && reason){
@@ -828,6 +873,7 @@ document.addEventListener('click', (event) => {
   else if(target.id === 'loadGoofishBtn') loadGoofishTasks();
   else if(target.id === 'previewBootstrapBtn') previewBootstrap();
   else if(target.id === 'startBootstrapBtn') startBootstrap();
+  else if(target.id === 'saveMemberCookieBtn') saveMemberCookieFromPage();
   else if(target.id === 'saveContentRulesBtn') saveContentRulesFromPage();
   else if(target.id === 'openTasksBtn') openUrl(goofishUrls.tasks_url);
   else if(target.id === 'openResultsBtn' || target.classList.contains('js-open-results')) openUrl(goofishUrls.results_url);
@@ -908,6 +954,54 @@ def _clean_error_message(value: object) -> str:
     return text[:1000]
 
 
+def _save_member_cookie(value: object, path: Path = MEMBER_COOKIE_FILE) -> dict[str, object]:
+    cookie = str(value or "").strip()
+    if not cookie:
+        raise ValueError("Cookie 不能为空")
+    if "\r" in cookie or "\n" in cookie:
+        raise ValueError("Cookie 不能包含换行")
+    if len(cookie) > 65_536:
+        raise ValueError("Cookie 内容过长")
+    if "wordpress_logged_in_" not in cookie:
+        raise ValueError("Cookie 中没有 wordpress_logged_in 登录信息")
+
+    task = next(
+        (
+            item
+            for item in load_tasks()
+            if (item.get("source_config") or {}).get("fetch_member_delivery")
+        ),
+        {
+            "source_config": {
+                "base_url": "https://theitzy.net",
+                "fetch_member_delivery": True,
+            }
+        },
+    )
+    try:
+        validation = validate_member_cookie(task, cookie_override=cookie) or {}
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+
+    with LOCAL_RUN_LOCK:
+        if any(job.get("status") == "running" for job in LOCAL_RUN_JOBS.values()):
+            raise ValueError("本地整理任务运行中，请完成后再更新 Cookie")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(cookie, encoding="utf-8")
+            if os.name != "nt":
+                os.chmod(temporary, 0o600)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        os.environ["THEITZY_COOKIE"] = cookie
+
+    username = str(validation.get("username") or "")
+    LOGGER.info("member_cookie updated username=%s", username or "unknown")
+    return {"configured": True, "username": username}
+
+
 def _job_snapshot(job_id: str) -> dict[str, object]:
     with LOCAL_RUN_LOCK:
         job = dict(LOCAL_RUN_JOBS.get(job_id) or {})
@@ -951,10 +1045,14 @@ def _run_local_job(job_id: str, task_name: str, include_seen: bool) -> None:
         _finish_local_run_job(job_id, error=exc)
 
 
-def _start_local_run_job(task_name: str, include_seen: bool) -> dict[str, object]:
+def _start_local_run_job(task_name: str, include_seen: bool, request_id: str = "") -> dict[str, object]:
     job_id = uuid.uuid4().hex
     now = time.time()
     with LOCAL_RUN_LOCK:
+        if request_id:
+            existing_job_id = LOCAL_RUN_REQUESTS.get(request_id)
+            if existing_job_id and existing_job_id in LOCAL_RUN_JOBS:
+                return dict(LOCAL_RUN_JOBS[existing_job_id])
         # ponytail: one process-wide lock; use per-account locks if concurrency is needed later.
         if any(job.get("status") == "running" for job in LOCAL_RUN_JOBS.values()):
             raise RuntimeError("已有本地整理任务运行中，请等待完成后再启动")
@@ -965,6 +1063,8 @@ def _start_local_run_job(task_name: str, include_seen: bool) -> dict[str, object
             "include_seen": include_seen,
             "started_at": now,
         }
+        if request_id:
+            LOCAL_RUN_REQUESTS[request_id] = job_id
         finished_jobs = [
             (str(job.get("job_id")), float(job.get("finished_at") or 0))
             for job in LOCAL_RUN_JOBS.values()
@@ -972,6 +1072,9 @@ def _start_local_run_job(task_name: str, include_seen: bool) -> dict[str, object
         ]
         for old_job_id, _ in sorted(finished_jobs, key=lambda item: item[1], reverse=True)[20:]:
             LOCAL_RUN_JOBS.pop(old_job_id, None)
+        for key, mapped_job_id in list(LOCAL_RUN_REQUESTS.items()):
+            if mapped_job_id not in LOCAL_RUN_JOBS:
+                LOCAL_RUN_REQUESTS.pop(key, None)
     thread = threading.Thread(target=_run_local_job, args=(job_id, task_name, include_seen), daemon=True)
     thread.start()
     return _job_snapshot(job_id)
@@ -1012,6 +1115,8 @@ def _delivery_payload(item: dict[str, object]) -> tuple[str, str]:
         return "", f"未获取：{message or '会员页中没有识别到百度网盘链接'}"
     if status == "quota_exhausted":
         return "", f"未获取：{message or '今日会员下载额度已用完，请明天再试'}"
+    if status == "request_budget_exhausted":
+        return "", f"未获取：{message or '本次运行已达到会员请求预算，已跳过额外请求'}"
     if status == "error":
         return "", f"未获取：会员页请求失败{('：' + message) if message else ''}"
     if status == "missing_page_url":
@@ -1356,8 +1461,9 @@ class Handler(BaseHTTPRequestHandler):
             if path in {"/api/run", "/api/local/run"}:
                 task_name = str(body["task"])
                 include_seen = bool(body.get("include_seen", False))
-                LOGGER.info("local_run request task=%s include_seen=%s", task_name, include_seen)
-                self._send(202, _start_local_run_job(task_name, include_seen))
+                request_id = str(body.get("request_id") or "").strip()
+                LOGGER.info("local_run request task=%s include_seen=%s request_id=%s", task_name, include_seen, request_id)
+                self._send(202, _start_local_run_job(task_name, include_seen, request_id))
             elif path == "/api/goofish/bootstrap/dry-run":
                 result = create_from_specs(_goofish_client(), load_specs(), dry_run=True)
                 self._send(200, result)
@@ -1392,6 +1498,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, result)
             elif path == "/api/local/content-rules":
                 result = save_content_rules(body)
+                self._send(200, result)
+            elif path == "/api/local/member-cookie":
+                result = _save_member_cookie(body.get("cookie"))
                 self._send(200, result)
             else:
                 self._send(404, {"error": "not found"})
